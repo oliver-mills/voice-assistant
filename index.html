@@ -94,7 +94,27 @@
                 
                 const chatData = await chatResponse.json();
                 console.log('Chat response:', chatData);
+                statusEl.textContent = `Chat says: "${chatData.reply}" — speaking...`;
+
+                // Ask the server to synthesize speech, then play the returned audio
+                const ttsResponse = await fetch('/api/text-to-speech', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: chatData.reply })
+                });
+
+                // The response body is raw audio bytes (a Blob), not JSON;
+                // createObjectURL turns that Blob into a URL the <audio> tag can play
+                const ttsBlob = await ttsResponse.blob();
+                const audioUrl = URL.createObjectURL(ttsBlob);
+                const audio = new Audio(audioUrl);
+                audio.play();
+
+                // Wait for playback to finish before updating the status text,
+                // so the "speaking..." message stays up for the full reply
+                audio.onended = () => {
                 statusEl.textContent = `Chat says: "${chatData.reply}"`;
+                };
             } catch (err) {
                 statusEl.textContent = 'Transcription failed';
                 console.error(err);
