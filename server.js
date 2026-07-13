@@ -34,9 +34,15 @@ app.post('/api/speech-to-text', upload.single('file'), async (req, res) => {
   }
 });
 
+// Holds the whole back-and-forth for the life of the server process, so
+// Claude gets prior turns as context instead of seeing each message in isolation
+const conversationHistory = [];
+
 app.post('/api/chat', async (req, res) => {
   try {
     const { text } = req.body;
+
+    conversationHistory.push({ role: 'user', content: text });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -48,14 +54,16 @@ app.post('/api/chat', async (req, res) => {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 300,
-        messages: [
-          { role: 'user', content: text }
-        ]
+        messages: conversationHistory
       })
     });
 
     const data = await response.json();
     const reply = data.content[0].text;
+
+    // Record Claude's reply too, so the next request continues the same thread
+    conversationHistory.push({ role: 'assistant', content: reply });
+
     res.json({ reply });
   } catch (err) {
     console.error(err);
