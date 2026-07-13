@@ -78,11 +78,23 @@
                 const response = await fetch('/api/speech-to-text', {
                 method: 'POST',
                 body: formData
-            });
+                });
 
-                const data = await response.json();
-                console.log('STT response:', data);
-                statusEl.textContent = `You said: "${data.text}"`;
+                const sstData = await response.json();
+                console.log('STT response:', sstData);
+                statusEl.textContent = `You said: "${sstData.text}"`;
+
+                statusEl.textContent += ' — thinking...';
+
+                const chatResponse = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: sstData.text })
+                });
+                
+                const chatData = await chatResponse.json();
+                console.log('Chat response:', chatData);
+                statusEl.textContent = `Chat says: "${chatData.reply}"`;
             } catch (err) {
                 statusEl.textContent = 'Transcription failed';
                 console.error(err);
