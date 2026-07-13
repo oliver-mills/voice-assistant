@@ -4,12 +4,14 @@
   <meta charset="UTF-8">
   <title>Voice Assistant</title>
   <style>
+    /* Page-wide layout: centers everything in a narrow column */
     body {
       font-family: system-ui, sans-serif;
       max-width: 600px;
       margin: 60px auto;
       text-align: center;
     }
+    /* Status line that reports what the app is currently doing */
     #status {
       margin-top: 20px;
       font-size: 18px;
@@ -24,6 +26,7 @@
       color: white;
       cursor: pointer;
     }
+    /* Style applied automatically when the button gets the "disabled" attribute */
     button:disabled {
       background: #999;
       cursor: not-allowed;
@@ -35,13 +38,56 @@
   <button id="recordBtn">Hold to Talk</button>
   <div id="status">Idle</div>
 
-  <script>
-    const recordBtn = document.getElementById('recordBtn');
-    const statusEl = document.getElementById('status');
+<script>
+  // Grab references to the DOM elements we need to read/update
+  const recordBtn = document.getElementById('recordBtn');
+  const statusEl = document.getElementById('status');
 
-    recordBtn.addEventListener('click', () => {
-      statusEl.textContent = 'Button clicked!';
-    });
-  </script>
+  // mediaRecorder captures audio from the mic; audioChunks collects the
+  // small pieces of data it hands us while recording is in progress
+  let mediaRecorder;
+  let audioChunks = [];
+
+  // The button doubles as both "start" and "stop" control. We tell which
+  // mode we're in by checking its current label text.
+  recordBtn.addEventListener('click', async () => {
+    if (recordBtn.textContent === 'Hold to Talk') {
+      // --- Start recording ---
+      try {
+        // Ask the browser for microphone access (triggers a permission
+        // prompt the first time). This is async because the user has to
+        // approve it, and it can also fail (denied, no mic, etc.).
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        // Fires repeatedly while recording, handing us chunks of audio data
+        mediaRecorder.ondataavailable = (event) => {
+          audioChunks.push(event.data);
+        };
+
+        // Fires once recording stops; combine all chunks into one audio file (Blob)
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          statusEl.textContent = `Recorded ${audioBlob.size} bytes of audio`;
+          console.log('Audio blob:', audioBlob);
+        };
+
+        mediaRecorder.start();
+        statusEl.textContent = 'Listening...';
+        recordBtn.textContent = 'Stop'; // flips the button into "stop" mode
+      } catch (err) {
+        // Happens if the user denies mic permission or no mic is available
+        statusEl.textContent = 'Mic permission denied or unavailable';
+        console.error(err);
+      }
+    } else {
+      // --- Stop recording ---
+      // This triggers the 'onstop' handler above, which builds the audio Blob
+      mediaRecorder.stop();
+      recordBtn.textContent = 'Hold to Talk'; // flip back to "start" mode
+    }
+  });
+</script>
 </body>
 </html>
