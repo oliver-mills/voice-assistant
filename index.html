@@ -67,10 +67,26 @@
         };
 
         // Fires once recording stops; combine all chunks into one audio file (Blob)
-        mediaRecorder.onstop = () => {
-          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-          statusEl.textContent = `Recorded ${audioBlob.size} bytes of audio`;
-          console.log('Audio blob:', audioBlob);
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            statusEl.textContent = 'Transcribing...';
+
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'recording.webm');
+
+            try {
+                const response = await fetch('/api/speech-to-text', {
+                method: 'POST',
+                body: formData
+            });
+
+                const data = await response.json();
+                console.log('STT response:', data);
+                statusEl.textContent = `You said: "${data.text}"`;
+            } catch (err) {
+                statusEl.textContent = 'Transcription failed';
+                console.error(err);
+            }
         };
 
         mediaRecorder.start();
