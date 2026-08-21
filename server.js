@@ -20,6 +20,15 @@ const EFFORT = 'low';
 // the richer voice quality of multilingual_v2
 const TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_multilingual_v2';
 
+// Anthropic runs this one on their side: we declare it, they perform the search
+// and feed the results back into the same response. Nothing to execute here.
+// max_uses matters more here than in a chat app: every extra search is a few
+// more seconds of silence for someone waiting to be spoken to
+const TOOLS = [{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }];
+
+// Searching can pause a turn more than once; this stops a pathological loop
+const MAX_TURN_LEGS = 5;
+
 // Serve our HTML/CSS/JS files
 app.use(express.static('.'));
 app.use(express.json());
@@ -33,7 +42,12 @@ const SYSTEM_PROMPT = [
   'Write plain spoken prose. No markdown, no bullet points, no code blocks,',
   'no emoji, no asterisks or stage directions.',
   'If a question genuinely needs a long answer, give the short version first',
-  'and offer to go into more detail.'
+  'and offer to go into more detail.',
+  'You can search the web. Use it when the answer depends on current facts',
+  'like news, prices, weather, or sports results, and not for things you',
+  'already know. Searching is slow, so prefer one search over several.',
+  'Keep sourced answers just as short, and say where it came from the way a',
+  'person would, such as "according to the BBC". Never read out a URL.'
 ].join(' ');
 
 // Both APIs report errors as JSON, but a proxy or gateway in between can
@@ -132,23 +146,16 @@ app.post('/api/chat', async (req, res) => {
     { role: 'user', content: text }
   ]);
 
-  const stream = anthropic.messages.stream({
-    model: MODEL,
-    max_tokens: 1000,
-    system: SYSTEM_PROMPT,
-    output_config: { effort: EFFORT },
-    messages
-  });
-
   // Barge-in: when the browser drops the connection mid-reply, stop paying for
   // tokens nobody will hear
   // Watch the response, not the request: req emits 'close' as soon as Express
   // finishes reading the body, which would abort every turn instantly
   let aborted = false;
+  let currentStream = null;
   res.on('close', () => {
     if (!res.writableEnded) {
       aborted = true;
-      stream.abort();
+      if (currentStream) currentStream.abort();
     }
   });
 
@@ -169,26 +176,66 @@ app.post('/api/chat', async (req, res) => {
 
   let reply = '';
   try {
-    for await (const event of stream) {
-      // Adaptive thinking also emits deltas; only the text ones get spoken
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        beginStream();
-        reply += event.delta.text;
-        sendEvent(res, 'delta', { text: event.delta.text });
-      }
-    }
+    // A turn can take more than one request: searching the web is long-running,
+    // so the API may hand back stop_reason "pause_turn" partway through and
+    // expect the partial reply to be sent straight back to be continued.
+    const turnMessages = [...messages];
 
-    if (aborted) return;
+    for (let leg = 0; leg < MAX_TURN_LEGS; leg++) {
+      const stream = anthropic.messages.stream({
+        model: MODEL,
+        max_tokens: 1000,
+        system: SYSTEM_PROMPT,
+        output_config: { effort: EFFORT },
+        tools: TOOLS,
+        messages: turnMessages
+      });
+      currentStream = stream;
+
+      for await (const event of stream) {
+        // Tell the client a search has started, so the pause before the answer
+        // reads as looking something up rather than the app having frozen
+        if (event.type === 'content_block_start' &&
+            event.content_block.type === 'server_tool_use') {
+          beginStream();
+          sendEvent(res, 'searching', { tool: event.content_block.name });
+        }
+
+        // A reply that searched comes back as several text blocks. Run together
+        // they read as "look that up.Kimi", which also hides the sentence break
+        // the speech chunker needs, so restore the gap between them.
+        if (event.type === 'content_block_start' &&
+            event.content_block.type === 'text' &&
+            reply && !/\s$/.test(reply)) {
+          beginStream();
+          reply += ' ';
+          sendEvent(res, 'delta', { text: ' ' });
+        }
+
+        // Adaptive thinking also emits deltas; only the text ones get spoken
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          beginStream();
+          reply += event.delta.text;
+          sendEvent(res, 'delta', { text: event.delta.text });
+        }
+      }
+
+      if (aborted) return;
+
+      // Keep the whole message, not just its text: the search calls and their
+      // results have to go back verbatim for the next turn to make sense
+      const final = await stream.finalMessage();
+      turnMessages.push({ role: 'assistant', content: final.content });
+
+      if (final.stop_reason !== 'pause_turn') break;
+    }
 
     if (!reply.trim()) {
       throw new Error('Claude returned no text');
     }
 
     // Record both sides only now that the turn has succeeded
-    conversationHistory = trimHistory([
-      ...messages,
-      { role: 'assistant', content: reply }
-    ]);
+    conversationHistory = trimHistory(turnMessages);
 
     beginStream();
     sendEvent(res, 'done', { reply });

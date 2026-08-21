@@ -192,7 +192,7 @@ async function transcribe(blob, filename, signal) {
 }
 
 // Reads the server's SSE stream, handing each token to onDelta as it lands
-async function streamChat(text, signal, onDelta) {
+async function streamChat(text, signal, onDelta, onSearching) {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -233,6 +233,8 @@ async function streamChat(text, signal, onDelta) {
       if (name === 'delta') {
         reply += payload.text;
         onDelta(payload.text);
+      } else if (name === 'searching') {
+        onSearching();
       } else if (name === 'error') {
         throw new Error(payload.error);
       } else if (name === 'done') {
@@ -415,6 +417,7 @@ async function runTurn(blob, filename) {
 
   let buffer = '';
   let spokeAnything = false;
+  let searches = 0;
   const playback = playbackLoop(t);
 
   try {
@@ -432,6 +435,14 @@ async function runTurn(blob, filename) {
           setMode('speaking');
         }
         enqueueSpeech(t, chunk);
+      }
+    }, () => {
+      // Searching takes seconds. Without a cue the app just looks frozen.
+      searches++;
+      if (mode === 'thinking') {
+        statusEl.textContent = searches > 1
+          ? `Searching the web (${searches})...`
+          : 'Searching the web...';
       }
     });
 
