@@ -1,0 +1,311 @@
+/* One palette defined here, overridden wholesale for dark mode below, so no
+   rule further down needs to know which theme is active */
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f8;
+  --panel: #ffffff;
+  --border: #e4e6ec;
+  --text: #14161c;
+  --muted: #6b7280;
+  --accent: #2f6df6;
+  --user-bubble: #2f6df6;
+  --user-text: #ffffff;
+  --bot-bubble: #eef0f5;
+  --bot-text: #14161c;
+  --danger: #b3261e;
+  --danger-bg: #fdeceb;
+  --danger-border: #f5c6c2;
+  --rec: #e5484d;
+  --speak: #12a594;
+  --shadow: 0 1px 2px rgba(16, 18, 29, .05), 0 10px 30px rgba(16, 18, 29, .07);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1015;
+    --panel: #15181f;
+    --border: #262b35;
+    --text: #e6e8ee;
+    --muted: #99a0ac;
+    --accent: #5b8dff;
+    --bot-bubble: #212632;
+    --bot-text: #e6e8ee;
+    --danger: #ff9d95;
+    --danger-bg: #351d1c;
+    --danger-border: #59302d;
+    --speak: #2bd4bd;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .35);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+
+/* The app is one fixed-height card: header and footer stay put while only the
+   transcript in between scrolls */
+.app {
+  width: 100%;
+  max-width: 680px;
+  height: 100%;
+  max-height: 820px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -.01em;
+}
+.header-controls { display: flex; align-items: center; gap: 14px; }
+
+.ghost-btn {
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.ghost-btn:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.ghost-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Hands-free toggle: the real checkbox stays focusable but invisible, and the
+   track/knob spans are what actually get drawn */
+.switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .track {
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--border);
+  position: relative;
+  transition: background .18s;
+  flex: none;
+}
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  transition: transform .18s;
+}
+.switch input:checked + .track { background: var(--speak); }
+.switch input:checked + .track .knob { transform: translateX(14px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch-label { font-size: 13px; color: var(--muted); }
+
+#transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scroll-behavior: smooth;
+}
+
+/* Shown only while the transcript has no messages; .has-messages on the
+   container hides it without needing to remove the node */
+.empty-state {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 300px;
+}
+#transcript.has-messages .empty-state { display: none; }
+
+.msg {
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 15px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  animation: rise .18s ease-out;
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  color: var(--user-text);
+  border-bottom-right-radius: 5px;
+}
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--bot-bubble);
+  color: var(--bot-text);
+  border-bottom-left-radius: 5px;
+}
+.msg.error {
+  align-self: center;
+  max-width: 90%;
+  text-align: center;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  font-size: 13.5px;
+}
+/* Marks a reply that was cut off by the user talking over it */
+.msg.interrupted { opacity: .62; }
+
+/* Blinking caret while the reply is still streaming in */
+.msg.streaming .body::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: caret 1s steps(2) infinite;
+}
+@keyframes caret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+.replay {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.replay:hover { color: var(--text); }
+.replay svg { width: 12px; height: 12px; fill: currentColor; }
+
+/* Three-dot placeholder while a turn is still being fetched */
+.dots { display: inline-flex; gap: 4px; padding: 3px 0; }
+.dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .35;
+  animation: blink 1.2s infinite;
+}
+.dots span:nth-child(2) { animation-delay: .18s; }
+.dots span:nth-child(3) { animation-delay: .36s; }
+@keyframes blink {
+  0%, 60%, 100% { opacity: .25; }
+  30%           { opacity: .9; }
+}
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 18px 20px 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.mic-wrap { position: relative; display: grid; place-items: center; }
+
+#recordBtn {
+  position: relative;
+  z-index: 1;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: transform .12s ease, background .2s ease;
+  touch-action: none; /* stop mobile from scrolling instead of press-holding */
+  -webkit-user-select: none;
+  user-select: none;
+}
+#recordBtn svg { width: 26px; height: 26px; fill: currentColor; pointer-events: none; }
+#recordBtn:hover:not(:disabled) { transform: scale(1.04); }
+#recordBtn:disabled { background: var(--muted); cursor: not-allowed; opacity: .6; }
+#recordBtn.recording { background: var(--rec); transform: scale(1.06); }
+#recordBtn.speaking { background: var(--speak); }
+
+/* Expanding ring behind the button, rendered only while recording or speaking */
+.pulse {
+  position: absolute;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  background: var(--rec);
+  opacity: 0;
+}
+.mic-wrap.speaking .pulse { background: var(--speak); }
+.mic-wrap.recording .pulse,
+.mic-wrap.speaking .pulse { animation: pulse 1.5s ease-out infinite; }
+.mic-wrap.recording .pulse:nth-child(2),
+.mic-wrap.speaking .pulse:nth-child(2) { animation-delay: .5s; }
+@keyframes pulse {
+  0%   { transform: scale(1);   opacity: .35; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+
+#status {
+  font-size: 13.5px;
+  color: var(--muted);
+  min-height: 20px;
+  text-align: center;
+}
+#status.live { color: var(--rec); font-variant-numeric: tabular-nums; }
+#status.talking { color: var(--speak); }
+
+.hint { font-size: 11.5px; color: var(--muted); opacity: .75; text-align: center; }
+.hint kbd {
+  font: inherit;
+  font-size: 10.5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 4px;
+}

@@ -1,0 +1,800 @@
+// ---------------------------------------------------------------------------
+// Elements
+// ---------------------------------------------------------------------------
+
+const transcript = document.getElementById('transcript');
+const recordBtn = document.getElementById('recordBtn');
+const micWrap = document.getElementById('micWrap');
+const statusEl = document.getElementById('status');
+const hintEl = document.getElementById('hint');
+const newChatBtn = document.getElementById('newChatBtn');
+const handsFreeToggle = document.getElementById('handsFreeToggle');
+
+// ---------------------------------------------------------------------------
+// Tuning
+// ---------------------------------------------------------------------------
+
+const MIN_RECORDING_MS = 400;   // anything shorter is an accidental tap
+const MIN_CHUNK_CHARS = 20;     // don't send "Yes." to TTS on its own
+const MAX_CHUNK_CHARS = 220;    // break up a rambling sentence so speech starts
+
+// Hands-free voice detection, sampled every VAD_FRAME_MS
+const VAD_FRAME_MS = 50;
+const VAD_CALIBRATION_FRAMES = 20;  // ~1s of room tone before we trust the floor
+const VAD_START_FRAMES = 3;         // ~150ms of speech to open the mic
+const VAD_END_FRAMES = 18;          // ~900ms of silence to close it
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+// idle | listening | transcribing | thinking | speaking
+let mode = 'idle';
+let turn = null;          // the in-flight turn, if any
+const allAudioUrls = [];  // every clip ever made, so New chat can free them
+
+let mediaRecorder;
+let pushToTalkStream;     // only used when hands-free is off
+let audioChunks = [];
+let isRecording = false;
+let wantsToRecord = false;
+let startedAt = 0;
+let timerId;
+
+// ---------------------------------------------------------------------------
+// Transcript rendering
+// ---------------------------------------------------------------------------
+
+function scrollToBottom() {
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+// Returns a handle rather than the raw node, so callers can keep appending to a
+// bubble as tokens stream in without re-querying the DOM
+function addMessage(role, text, { pending = false } = {}) {
+  const el = document.createElement('div');
+  el.className = `msg ${role}`;
+
+  const body = document.createElement('span');
+  body.className = 'body';
+  if (pending) {
+    body.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
+  } else {
+    body.textContent = text;
+  }
+  el.appendChild(body);
+
+  transcript.appendChild(el);
+  transcript.classList.add('has-messages');
+  scrollToBottom();
+
+  let content = pending ? '' : text;
+
+  return {
+    el,
+    get text() { return content; },
+    setText(value) {
+      content = value;
+      body.textContent = value;
+      scrollToBottom();
+    },
+    // First token replaces the dots; every token after that just appends
+    append(value) {
+      if (!content) {
+        el.classList.add('streaming');
+        body.textContent = '';
+      }
+      content += value;
+      body.textContent = content;
+      scrollToBottom();
+    },
+    endStream() {
+      el.classList.remove('streaming');
+    },
+    markInterrupted() {
+      el.classList.remove('streaming');
+      el.classList.add('interrupted');
+    },
+    fail(message) {
+      el.className = 'msg error';
+      body.textContent = message;
+      scrollToBottom();
+    },
+    remove() {
+      el.remove();
+    },
+    // The reply was spoken as several clips, so replay walks them in order
+    attachAudio(urls) {
+      if (!urls.length) return;
+      const button = document.createElement('button');
+      button.className = 'replay';
+      button.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Replay';
+      button.addEventListener('click', () => replay(urls));
+      el.appendChild(document.createElement('br'));
+      el.appendChild(button);
+      scrollToBottom();
+    }
+  };
+}
+
+function addError(message) {
+  addMessage('error', message);
+}
+
+// ---------------------------------------------------------------------------
+// Mode and status
+// ---------------------------------------------------------------------------
+
+const STATUS_TEXT = {
+  idle: 'Ready',
+  transcribing: 'Transcribing...',
+  thinking: 'Thinking...',
+  speaking: 'Speaking - press to interrupt'
+};
+
+function setMode(next) {
+  mode = next;
+
+  micWrap.classList.toggle('recording', next === 'listening');
+  recordBtn.classList.toggle('recording', next === 'listening');
+  micWrap.classList.toggle('speaking', next === 'speaking');
+  recordBtn.classList.toggle('speaking', next === 'speaking');
+  statusEl.classList.toggle('live', next === 'listening');
+  statusEl.classList.toggle('talking', next === 'speaking');
+
+  if (next !== 'listening') statusEl.textContent = STATUS_TEXT[next] || '';
+
+  updateHint();
+
+  // Hands-free listens again only once the assistant has stopped talking, so
+  // it never transcribes its own voice
+  if (vad.enabled) {
+    vad.paused = next !== 'idle';
+    if (next === 'idle') resetVadCounters();
+  }
+}
+
+function updateHint() {
+  if (handsFreeToggle.checked) {
+    hintEl.textContent = mode === 'idle'
+      ? 'listening - just start talking'
+      : 'hold the button to interrupt';
+  } else {
+    hintEl.innerHTML = 'hold the button or <kbd>space</kbd>';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// API calls
+// ---------------------------------------------------------------------------
+
+async function postJSON(url, body) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+async function transcribe(blob, filename, signal) {
+  const formData = new FormData();
+  formData.append('file', blob, filename);
+
+  const response = await fetch('/api/speech-to-text', { method: 'POST', body: formData, signal });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `Transcription failed (${response.status})`);
+  }
+  return data.text;
+}
+
+// Reads the server's SSE stream, handing each token to onDelta as it lands
+async function streamChat(text, signal, onDelta) {
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+    signal
+  });
+
+  // A failure before the first token still arrives as an ordinary JSON error
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Chat request failed (${response.status})`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let reply = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Events are separated by a blank line; anything after the last one is a
+    // partial event that has to wait for the next chunk
+    let split;
+    while ((split = buffer.indexOf('\n\n')) !== -1) {
+      const raw = buffer.slice(0, split);
+      buffer = buffer.slice(split + 2);
+
+      const nameMatch = raw.match(/^event: (.+)$/m);
+      const dataMatch = raw.match(/^data: ([\s\S]+)$/m);
+      if (!dataMatch) continue;
+
+      const name = nameMatch ? nameMatch[1] : 'message';
+      const payload = JSON.parse(dataMatch[1]);
+
+      if (name === 'delta') {
+        reply += payload.text;
+        onDelta(payload.text);
+      } else if (name === 'error') {
+        throw new Error(payload.error);
+      } else if (name === 'done') {
+        return payload.reply || reply;
+      }
+    }
+  }
+
+  return reply;
+}
+
+async function fetchSpeech(text, signal) {
+  const response = await fetch('/api/text-to-speech', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+    signal
+  });
+
+  // Success is raw audio bytes; failure is JSON, so only parse on failure
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Text-to-speech failed (${response.status})`);
+  }
+  return URL.createObjectURL(await response.blob());
+}
+
+// ---------------------------------------------------------------------------
+// Splitting the reply into speakable chunks
+// ---------------------------------------------------------------------------
+
+// Pulls the next speakable chunk off the front of the buffer, or returns null
+// if what is there so far might still grow into a longer sentence.
+function takeChunk(buffer) {
+  // Requiring whitespace after the terminator keeps "8.8 km" and "3.5" intact
+  const boundary = /[.!?…]["')\]]?(?=\s)/g;
+  let match;
+  while ((match = boundary.exec(buffer))) {
+    const end = match.index + match[0].length;
+    if (end >= MIN_CHUNK_CHARS) {
+      return [buffer.slice(0, end).trim(), buffer.slice(end)];
+    }
+  }
+
+  // No usable sentence end yet. If it has run long, break at a word boundary so
+  // speech isn't held up waiting for a full stop that may be far away.
+  if (buffer.length > MAX_CHUNK_CHARS) {
+    const cut = buffer.lastIndexOf(' ', MAX_CHUNK_CHARS);
+    if (cut > 0) return [buffer.slice(0, cut).trim(), buffer.slice(cut)];
+  }
+
+  return [null, buffer];
+}
+
+// ---------------------------------------------------------------------------
+// A turn: streams the reply while speaking the sentences already finished
+// ---------------------------------------------------------------------------
+
+function startTurn() {
+  const t = {
+    controller: new AbortController(),
+    cancelled: false,
+    queue: [],        // chunks waiting to be played, each already being fetched
+    urls: [],         // every clip URL, kept for replay and cleanup
+    audio: null,      // the clip currently playing
+    streamEnded: false,
+    wake: null        // resolves the playback loop when new work arrives
+  };
+  turn = t;
+  return t;
+}
+
+// Wakes the playback loop if it is parked waiting for the next chunk
+function notify(t) {
+  if (t.wake) {
+    const wake = t.wake;
+    t.wake = null;
+    wake();
+  }
+}
+
+function enqueueSpeech(t, text) {
+  // Fetch starts immediately so several sentences render in parallel, but they
+  // are played strictly in order
+  const urlPromise = fetchSpeech(text, t.controller.signal);
+  // If the turn is cancelled the loop may never await this one, and an aborted
+  // fetch with nobody watching it surfaces as an unhandled rejection
+  urlPromise.catch(() => {});
+  t.queue.push({ text, urlPromise });
+  notify(t);
+}
+
+async function playbackLoop(t) {
+  while (!t.cancelled) {
+    if (!t.queue.length) {
+      if (t.streamEnded) return;
+      await new Promise((resolve) => { t.wake = resolve; });
+      continue;
+    }
+
+    const item = t.queue.shift();
+    let url;
+    try {
+      url = await item.urlPromise;
+    } catch (err) {
+      if (!t.cancelled) {
+        addError(err.message);
+        console.error(err);
+      }
+      continue;
+    }
+
+    if (t.cancelled) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    t.urls.push(url);
+    allAudioUrls.push(url);
+    await playClip(t, url);
+  }
+}
+
+function playClip(t, url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url);
+    t.audio = audio;
+    audio.onended = resolve;
+    // A blocked autoplay shouldn't stall the queue; the replay button still works
+    audio.onerror = resolve;
+    audio.play().catch(resolve);
+  });
+}
+
+function cancelTurn(t) {
+  if (!t || t.cancelled) return;
+  t.cancelled = true;
+  t.controller.abort();
+  if (t.audio) {
+    t.audio.pause();
+    t.audio = null;
+  }
+  notify(t);
+}
+
+async function replay(urls) {
+  cancelTurn(turn);
+  for (const url of urls) {
+    await new Promise((resolve) => {
+      const audio = new Audio(url);
+      audio.onended = resolve;
+      audio.onerror = resolve;
+      audio.play().catch(resolve);
+    });
+  }
+}
+
+async function runTurn(blob, filename) {
+  const t = startTurn();
+
+  const userMsg = addMessage('user', '', { pending: true });
+  setMode('transcribing');
+
+  let text;
+  try {
+    text = await transcribe(blob, filename, t.controller.signal);
+    userMsg.setText(text);
+  } catch (err) {
+    userMsg.remove(); // nothing was said, so don't leave a blank bubble
+    if (!t.cancelled) {
+      addError(err.message);
+      console.error(err);
+      setMode('idle');
+    }
+    return;
+  }
+
+  const botMsg = addMessage('assistant', '', { pending: true });
+  setMode('thinking');
+
+  let buffer = '';
+  let spokeAnything = false;
+  const playback = playbackLoop(t);
+
+  try {
+    await streamChat(text, t.controller.signal, (delta) => {
+      botMsg.append(delta);
+      buffer += delta;
+
+      // Hand each finished sentence to TTS without waiting for the rest
+      for (;;) {
+        const [chunk, rest] = takeChunk(buffer);
+        if (!chunk) break;
+        buffer = rest;
+        if (!spokeAnything) {
+          spokeAnything = true;
+          setMode('speaking');
+        }
+        enqueueSpeech(t, chunk);
+      }
+    });
+
+    // Whatever is left after the last sentence terminator still needs speaking
+    if (buffer.trim()) {
+      if (!spokeAnything) setMode('speaking');
+      enqueueSpeech(t, buffer.trim());
+    }
+    botMsg.endStream();
+  } catch (err) {
+    if (t.cancelled) {
+      botMsg.markInterrupted();
+      return;
+    }
+    if (botMsg.text) {
+      botMsg.endStream();
+      addError(err.message);
+    } else {
+      botMsg.fail(err.message);
+    }
+    console.error(err);
+    setMode('idle');
+    return;
+  } finally {
+    t.streamEnded = true;
+    notify(t);
+  }
+
+  await playback;
+
+  if (t.cancelled) {
+    botMsg.markInterrupted();
+    return;
+  }
+
+  botMsg.attachAudio(t.urls);
+  turn = null;
+  setMode('idle');
+}
+
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+
+// Safari doesn't support webm, so ask the browser what it can actually record
+function pickMimeType() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus'
+  ];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+function filenameFor(type) {
+  if (type.includes('mp4')) return 'recording.mp4';
+  if (type.includes('ogg')) return 'recording.ogg';
+  return 'recording.webm';
+}
+
+function buildRecorder(stream, onComplete) {
+  const mimeType = pickMimeType();
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  audioChunks = [];
+
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0) audioChunks.push(event.data);
+  };
+  recorder.onstop = () => {
+    const type = recorder.mimeType || 'audio/webm';
+    onComplete(new Blob(audioChunks, { type }), filenameFor(type));
+  };
+
+  return recorder;
+}
+
+// Hands-free keeps one stream open for the whole session; push-to-talk opens
+// one per utterance so the browser's recording indicator goes off in between
+async function acquireStream() {
+  if (vad.enabled && vad.stream) return vad.stream;
+  pushToTalkStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  return pushToTalkStream;
+}
+
+function releaseStream() {
+  if (pushToTalkStream) {
+    pushToTalkStream.getTracks().forEach((track) => track.stop());
+    pushToTalkStream = null;
+  }
+}
+
+function startTimer() {
+  startedAt = Date.now();
+  timerId = setInterval(() => {
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    statusEl.textContent = `Listening  ${seconds}s`;
+  }, 100);
+}
+
+async function startRecording() {
+  if (isRecording || wantsToRecord) return;
+
+  // Grabbing the button part-way through a hands-free utterance: throw away
+  // what the detector had so far rather than run two recorders on one stream
+  if (vad.speaking) {
+    vad.speaking = false;
+    if (vad.recorder && vad.recorder.state !== 'inactive') {
+      vad.recorder.onstop = null;
+      vad.recorder.stop();
+    }
+    vad.recorder = null;
+    clearInterval(timerId);
+    resetVadCounters();
+  }
+
+  // Barge-in: talking over the assistant cancels whatever it was doing
+  cancelTurn(turn);
+  turn = null;
+
+  wantsToRecord = true;
+  if (vad.enabled) vad.paused = true;
+
+  try {
+    const stream = await acquireStream();
+
+    // The button may already have been released while we waited on the mic
+    if (!wantsToRecord) {
+      releaseStream();
+      return;
+    }
+
+    mediaRecorder = buildRecorder(stream, handleRecording);
+    mediaRecorder.start();
+    isRecording = true;
+    setMode('listening');
+    startTimer();
+  } catch (err) {
+    wantsToRecord = false;
+    releaseStream();
+    setMode('idle');
+    addError('Mic permission denied or unavailable');
+    console.error(err);
+  }
+}
+
+function stopRecording() {
+  wantsToRecord = false;
+  if (!isRecording) return;
+
+  isRecording = false;
+  clearInterval(timerId);
+  setMode('transcribing');
+  mediaRecorder.stop(); // triggers the onstop handler, which builds the Blob
+}
+
+function handleRecording(blob, filename) {
+  const elapsed = Date.now() - startedAt;
+  releaseStream();
+
+  if (elapsed < MIN_RECORDING_MS || blob.size === 0) {
+    setMode('idle');
+    statusEl.textContent = 'Hold a moment longer';
+    setTimeout(() => {
+      if (mode === 'idle') statusEl.textContent = STATUS_TEXT.idle;
+    }, 1600);
+    return;
+  }
+
+  runTurn(blob, filename);
+}
+
+// ---------------------------------------------------------------------------
+// Hands-free: watch the mic level and send when the talking stops
+// ---------------------------------------------------------------------------
+
+const vad = {
+  enabled: false,
+  paused: false,
+  stream: null,
+  context: null,
+  analyser: null,
+  samples: null,
+  timer: null,
+  calibrationFrames: 0,
+  noiseFloor: 0,
+  speechFrames: 0,
+  silenceFrames: 0,
+  speaking: false,
+  recorder: null
+};
+
+function resetVadCounters() {
+  vad.speechFrames = 0;
+  vad.silenceFrames = 0;
+}
+
+// Root mean square of the current audio frame: a rough loudness figure
+function currentLevel() {
+  vad.analyser.getByteTimeDomainData(vad.samples);
+  let sum = 0;
+  for (let i = 0; i < vad.samples.length; i++) {
+    const centred = (vad.samples[i] - 128) / 128;
+    sum += centred * centred;
+  }
+  return Math.sqrt(sum / vad.samples.length);
+}
+
+function vadFrame() {
+  if (vad.paused || isRecording) return;
+
+  const level = currentLevel();
+
+  // Spend the first second learning what this room sounds like when quiet
+  if (vad.calibrationFrames < VAD_CALIBRATION_FRAMES) {
+    vad.calibrationFrames++;
+    vad.noiseFloor = vad.noiseFloor
+      ? vad.noiseFloor * 0.8 + level * 0.2
+      : level;
+    return;
+  }
+
+  const threshold = Math.max(vad.noiseFloor * 3, 0.012);
+
+  if (!vad.speaking) {
+    vad.speechFrames = level > threshold ? vad.speechFrames + 1 : 0;
+    if (vad.speechFrames >= VAD_START_FRAMES) beginVadUtterance();
+    return;
+  }
+
+  vad.silenceFrames = level > threshold ? 0 : vad.silenceFrames + 1;
+  if (vad.silenceFrames >= VAD_END_FRAMES) endVadUtterance();
+}
+
+function beginVadUtterance() {
+  vad.speaking = true;
+  resetVadCounters();
+  startedAt = Date.now();
+
+  vad.recorder = buildRecorder(vad.stream, (blob, filename) => {
+    handleRecording(blob, filename);
+  });
+  vad.recorder.start();
+  setMode('listening');
+  startTimer();
+}
+
+function endVadUtterance() {
+  vad.speaking = false;
+  resetVadCounters();
+  clearInterval(timerId);
+  setMode('transcribing');
+  if (vad.recorder && vad.recorder.state !== 'inactive') vad.recorder.stop();
+  vad.recorder = null;
+}
+
+async function enableHandsFree() {
+  // Granting permission can take a while the first time, and a toggle that just
+  // sits there looking on with nothing happening reads as broken
+  hintEl.textContent = 'requesting microphone...';
+
+  try {
+    vad.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    handsFreeToggle.checked = false;
+    updateHint();
+    addError('Mic permission denied or unavailable');
+    console.error(err);
+    return;
+  }
+
+  // The user may have switched it back off while the prompt was up
+  if (!handsFreeToggle.checked) {
+    vad.stream.getTracks().forEach((track) => track.stop());
+    vad.stream = null;
+    updateHint();
+    return;
+  }
+
+  vad.context = new (window.AudioContext || window.webkitAudioContext)();
+  const source = vad.context.createMediaStreamSource(vad.stream);
+  vad.analyser = vad.context.createAnalyser();
+  vad.analyser.fftSize = 1024;
+  source.connect(vad.analyser);
+  vad.samples = new Uint8Array(vad.analyser.fftSize);
+
+  vad.enabled = true;
+  vad.paused = mode !== 'idle';
+  vad.calibrationFrames = 0;
+  vad.noiseFloor = 0;
+  resetVadCounters();
+  vad.timer = setInterval(vadFrame, VAD_FRAME_MS);
+
+  updateHint();
+}
+
+function disableHandsFree() {
+  clearInterval(vad.timer);
+  if (vad.recorder && vad.recorder.state !== 'inactive') vad.recorder.stop();
+  if (vad.stream) vad.stream.getTracks().forEach((track) => track.stop());
+  if (vad.context) vad.context.close();
+
+  Object.assign(vad, {
+    enabled: false,
+    paused: false,
+    stream: null,
+    context: null,
+    analyser: null,
+    samples: null,
+    timer: null,
+    speaking: false,
+    recorder: null
+  });
+
+  updateHint();
+}
+
+// ---------------------------------------------------------------------------
+// Input wiring
+// ---------------------------------------------------------------------------
+
+recordBtn.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  startRecording();
+});
+
+// Listening on the window rather than the button means dragging off the button
+// mid-sentence still ends the recording cleanly on release
+window.addEventListener('pointerup', stopRecording);
+window.addEventListener('pointercancel', stopRecording);
+
+window.addEventListener('keydown', (event) => {
+  if (event.code === 'Space' && !event.repeat) {
+    event.preventDefault();
+    startRecording();
+  }
+});
+window.addEventListener('keyup', (event) => {
+  if (event.code === 'Space') {
+    event.preventDefault();
+    stopRecording();
+  }
+});
+
+handsFreeToggle.addEventListener('change', () => {
+  if (handsFreeToggle.checked) enableHandsFree();
+  else disableHandsFree();
+});
+
+newChatBtn.addEventListener('click', async () => {
+  cancelTurn(turn);
+  turn = null;
+
+  try {
+    await postJSON('/api/reset', {});
+  } catch (err) {
+    addError(err.message);
+    return;
+  }
+
+  // Nothing can reach these clips once the transcript is gone
+  allAudioUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+  transcript.querySelectorAll('.msg').forEach((el) => el.remove());
+  transcript.classList.remove('has-messages');
+  setMode('idle');
+});
