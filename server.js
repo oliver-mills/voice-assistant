@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
+const path = require('path');
 const { Readable } = require('stream');
 const Anthropic = require('@anthropic-ai/sdk');
 
@@ -30,8 +31,9 @@ const TOOLS = [{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }]
 // Searching can pause a turn more than once; this stops a pathological loop
 const MAX_TURN_LEGS = 5;
 
-// Serve our HTML/CSS/JS files
-app.use(express.static('.'));
+// Serve only the browser files. Serving the project root also handed out
+// server.js, package.json and anything else that landed next to them.
+app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
 // Everything Claude says here gets read aloud, so the usual chat habits
@@ -185,9 +187,10 @@ app.post('/api/chat', async (req, res) => {
     for (let leg = 0; leg < MAX_TURN_LEGS; leg++) {
       const stream = anthropic.messages.stream({
         model: MODEL,
-        // Every reply token is a few characters of paid speech. The prompt asks
-        // for four sentences at most, so this only bites on a runaway reply.
-        max_tokens: 400,
+        // Thinking and search calls count against this too, so it can't double
+        // as a speech budget without cutting replies off. The browser caps how
+        // much of a reply it actually sends to ElevenLabs instead.
+        max_tokens: 1000,
         system: SYSTEM_PROMPT,
         output_config: { effort: EFFORT },
         tools: TOOLS,

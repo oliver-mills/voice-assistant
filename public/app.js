@@ -18,6 +18,9 @@ const MIN_RECORDING_MS = 400;   // anything shorter is an accidental tap
 const MIN_CHUNK_CHARS = 20;     // don't send "Yes." to TTS on its own
 const MAX_CHUNK_CHARS = 220;    // break up a rambling sentence so speech starts
 const TTS_LOOKAHEAD = 1;        // clips rendered ahead of the one playing
+// ElevenLabs bills per character. A normal four-sentence answer is well under
+// this; anything past it still shows in the transcript, just isn't spoken.
+const MAX_SPOKEN_CHARS = 700;
 
 // Hands-free voice detection, sampled every VAD_FRAME_MS
 const VAD_FRAME_MS = 50;
@@ -303,6 +306,8 @@ function startTurn() {
     urls: [],         // every clip URL, kept for replay and cleanup
     audio: null,      // the clip currently playing
     streamEnded: false,
+    spokenChars: 0,   // characters sent off for speech so far this turn
+    overBudget: false,
     wake: null        // resolves the playback loop when new work arrives
   };
   turn = t;
@@ -319,6 +324,14 @@ function notify(t) {
 }
 
 function enqueueSpeech(t, text) {
+  if (t.spokenChars + text.length > MAX_SPOKEN_CHARS) {
+    if (!t.overBudget) {
+      t.overBudget = true;
+      addError('Reply was long, so the rest is text only');
+    }
+    return;
+  }
+  t.spokenChars += text.length;
   t.queue.push({ text, urlPromise: null });
   prefetch(t);
   notify(t);
