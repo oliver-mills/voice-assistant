@@ -7,7 +7,7 @@ to learn **ElevenLabs** voice APIs, **MCP** (Model Context Protocol) and the
 **Claude API**. You hold <kbd>Space</kbd> and talk, and it talks back, using
 tools from MCP servers along the way.
 
-![Screenshot](docs/screenshot.jpg)
+![Demo: asking about the project's files through MCP, then saving a memory](docs/demo.gif)
 
 ## What it does
 
