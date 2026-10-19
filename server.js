@@ -4,6 +4,8 @@ const multer = require('multer');
 const path = require('path');
 const { Readable } = require('stream');
 const Anthropic = require('@anthropic-ai/sdk');
+const store = require('./store');
+const localTools = require('./tools');
 
 const app = express();
 // Uploads are held in memory, so cap the size to keep a runaway recording
@@ -26,10 +28,19 @@ const MAX_TTS_CHARS = 400;
 // and feed the results back into the same response. Nothing to execute here.
 // max_uses matters more here than in a chat app: every extra search is a few
 // more seconds of silence for someone waiting to be spoken to
-const TOOLS = [{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }];
+// The rest run here, in tools.js, and their results go back as tool_result.
+const TOOLS = [
+  { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
+  ...localTools.DEFINITIONS
+];
 
-// Searching can pause a turn more than once; this stops a pathological loop
-const MAX_TURN_LEGS = 5;
+// If Claude declines a request on safety grounds, the API reruns it on a
+// fallback model it picks by the kind of refusal, within the same call
+const BETAS = ['server-side-fallback-2026-07-01'];
+
+// Searches can pause a turn and tool calls extend it; this stops a
+// pathological loop
+const MAX_TURN_LEGS = 6;
 
 // Serve only the browser files. Serving the project root also handed out
 // server.js, package.json and anything else that landed next to them.
@@ -50,8 +61,21 @@ const SYSTEM_PROMPT = [
   'like news, prices, weather, or sports results, and not for things you',
   'already know. Searching is slow, so prefer one search over several.',
   'Keep sourced answers just as short, and say where it came from the way a',
-  'person would, such as "according to the BBC". Never read out a URL.'
+  'person would, such as "according to the BBC". Never read out a URL.',
+  'You can save lasting facts about the user, delete them, and set timers.',
+  'After using one of these, confirm it in a few words.'
 ].join(' ');
+
+// The parts that change: the clock, so "in twenty minutes" and "what day is
+// it" work, and what the assistant has been asked to remember
+function buildSystemPrompt() {
+  const now = new Date().toLocaleString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+  });
+  return [SYSTEM_PROMPT, `The current date and time is ${now}.`, localTools.describeMemories()]
+    .join('\n\n');
+}
 
 // Both APIs report errors as JSON, but a proxy or gateway in between can
 // return HTML instead. Falling back to raw text keeps the real cause visible
@@ -114,17 +138,25 @@ app.post('/api/speech-to-text', upload.single('file'), async (req, res) => {
   }
 });
 
-// Holds the whole back-and-forth for the life of the server process, so
-// Claude gets prior turns as context instead of seeing each message in isolation
-let conversationHistory = [];
+// The back-and-forth so far, so Claude gets prior turns as context instead of
+// seeing each message in isolation. Saved to disk so a restart keeps it.
+let conversationHistory = store.load('history', []);
 // Long sessions would otherwise resend an ever-growing history on every turn
 const MAX_HISTORY_MESSAGES = 40;
 
+// A message the user actually said, as opposed to tool results, which also go
+// in as user messages
+function isUserTurn(message) {
+  return message.role === 'user' && typeof message.content === 'string';
+}
+
 function trimHistory(messages) {
   const recent = messages.slice(-MAX_HISTORY_MESSAGES);
-  // The API requires the first message to be from the user, and slicing can
-  // land mid-pair, so drop a leading assistant turn if trimming created one
-  return recent[0]?.role === 'assistant' ? recent.slice(1) : recent;
+  // Slicing can land mid-turn: on an assistant reply, or on tool results whose
+  // tool call was cut off. Either is rejected by the API, so start at the
+  // first thing the user said.
+  const start = recent.findIndex(isUserTurn);
+  return start === -1 ? [] : recent.slice(start);
 }
 
 // Server-sent events: one JSON payload per named event, blank line terminated
@@ -184,14 +216,19 @@ app.post('/api/chat', async (req, res) => {
     // expect the partial reply to be sent straight back to be continued.
     const turnMessages = [...messages];
 
+    // Built once per turn so every leg sees the same prompt
+    const system = buildSystemPrompt();
+
     for (let leg = 0; leg < MAX_TURN_LEGS; leg++) {
-      const stream = anthropic.messages.stream({
+      const stream = anthropic.beta.messages.stream({
         model: MODEL,
+        betas: BETAS,
+        fallbacks: 'default',
         // Thinking and search calls count against this too, so it can't double
         // as a speech budget without cutting replies off. The browser caps how
         // much of a reply it actually sends to ElevenLabs instead.
         max_tokens: 1000,
-        system: SYSTEM_PROMPT,
+        system,
         output_config: { effort: EFFORT },
         tools: TOOLS,
         messages: turnMessages
@@ -231,9 +268,36 @@ app.post('/api/chat', async (req, res) => {
       // Keep the whole message, not just its text: the search calls and their
       // results have to go back verbatim for the next turn to make sense
       const final = await stream.finalMessage();
-      turnMessages.push({ role: 'assistant', content: final.content });
+      // A reply cut off mid tool call holds a call that will never get a
+      // result, which the API rejects on the next turn. Drop it.
+      const content = final.stop_reason === 'tool_use'
+        ? final.content
+        : final.content.filter((block) => block.type !== 'tool_use');
+      turnMessages.push({ role: 'assistant', content });
 
-      if (final.stop_reason !== 'pause_turn') break;
+      if (final.stop_reason === 'pause_turn') continue;
+      if (final.stop_reason !== 'tool_use') {
+        if (final.stop_reason === 'refusal' && !reply.trim()) {
+          throw new Error('Claude declined to answer that');
+        }
+        break;
+      }
+
+      // One of our own tools. Every call in the message gets its result back
+      // in a single user message, then the turn carries on from there.
+      const results = final.content
+        .filter((block) => block.type === 'tool_use')
+        .map((block) => ({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          ...localTools.run(block, {
+            onTimer: (timer) => {
+              beginStream();
+              sendEvent(res, 'timer', timer);
+            }
+          })
+        }));
+      turnMessages.push({ role: 'user', content: results });
     }
 
     if (!reply.trim()) {
@@ -242,6 +306,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Record both sides only now that the turn has succeeded
     conversationHistory = trimHistory(turnMessages);
+    saveHistory();
 
     beginStream();
     sendEvent(res, 'done', { reply });
@@ -265,9 +330,43 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Starts a fresh conversation without restarting the server
+// A failed save shouldn't fail the turn the user just heard
+function saveHistory() {
+  try {
+    store.save('history', conversationHistory);
+  } catch (err) {
+    console.error('Could not save conversation history:', err.message);
+  }
+}
+
+// Lets the page show the conversation that was going on before a reload
+app.get('/api/history', (req, res) => {
+  const turns = [];
+  for (const message of conversationHistory) {
+    if (isUserTurn(message)) {
+      turns.push({ role: 'user', text: message.content });
+      continue;
+    }
+    if (message.role !== 'assistant') continue;
+    const text = message.content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join(' ')
+      .trim();
+    if (!text) continue;
+    // One turn can span several assistant messages; show it as one bubble
+    const last = turns[turns.length - 1];
+    if (last && last.role === 'assistant') last.text += ` ${text}`;
+    else turns.push({ role: 'assistant', text });
+  }
+  res.json({ turns });
+});
+
+// Starts a fresh conversation. Saved facts about the user are kept; ask the
+// assistant to forget them.
 app.post('/api/reset', (req, res) => {
   conversationHistory = [];
+  saveHistory();
   res.json({ ok: true });
 });
 
@@ -341,12 +440,17 @@ app.post('/api/text-to-speech', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  // Catch a missing .env now rather than as a confusing 401 mid-conversation
-  const missing = ['ELEVENLABS_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_ID']
-    .filter((name) => !process.env[name]);
-  if (missing.length) {
-    console.warn(`Warning: missing from .env - ${missing.join(', ')}`);
-  }
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+// Tests load this file for its helpers without starting a server
+if (require.main === module) {
+  app.listen(PORT, () => {
+    // Catch a missing .env now rather than as a confusing 401 mid-conversation
+    const missing = ['ELEVENLABS_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_ID']
+      .filter((name) => !process.env[name]);
+    if (missing.length) {
+      console.warn(`Warning: missing from .env - ${missing.join(', ')}`);
+    }
+    console.log(`Server running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app, trimHistory };

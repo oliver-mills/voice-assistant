@@ -210,6 +210,16 @@ header h1 {
   border: 1px solid var(--danger-border);
   font-size: 13.5px;
 }
+.msg.timer {
+  align-self: center;
+  max-width: 90%;
+  text-align: center;
+  background: none;
+  color: var(--speak);
+  border: 1px solid var(--speak);
+  font-size: 13.5px;
+  font-weight: 600;
+}
 /* Marks a reply that was cut off by the user talking over it */
 .msg.interrupted { opacity: .62; }
 

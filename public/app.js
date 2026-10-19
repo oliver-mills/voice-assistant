@@ -243,6 +243,8 @@ async function streamChat(text, signal, onDelta, onSearching) {
         onDelta(payload.text);
       } else if (name === 'searching') {
         onSearching();
+      } else if (name === 'timer') {
+        scheduleTimer(payload);
       } else if (name === 'error') {
         throw new Error(payload.error);
       } else if (name === 'done') {
@@ -521,6 +523,38 @@ async function runTurn(blob, filename, heard) {
   botMsg.attachAudio(t.clips);
   turn = null;
   setMode('idle');
+}
+
+// ---------------------------------------------------------------------------
+// Timers the assistant set. They live in this page, so a reload loses them.
+// ---------------------------------------------------------------------------
+
+function scheduleTimer({ seconds, label }) {
+  setTimeout(() => ringTimer(label), seconds * 1000);
+}
+
+function ringTimer(label) {
+  addMessage('timer', `${label}: time's up`);
+  // A chime rather than speech: it costs nothing, and works whatever the
+  // assistant is doing at the time
+  try {
+    const context = new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.35, 0.7].forEach((offset) => {
+      const tone = context.createOscillator();
+      const gain = context.createGain();
+      tone.frequency.value = 880;
+      const at = context.currentTime + offset;
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.3, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+      tone.connect(gain).connect(context.destination);
+      tone.start(at);
+      tone.stop(at + 0.3);
+    });
+    setTimeout(() => context.close(), 1500);
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,3 +1160,21 @@ newChatBtn.addEventListener('click', async () => {
   transcript.classList.remove('has-messages');
   setMode('idle');
 });
+
+// The server keeps the conversation across reloads and restarts, so pick up
+// where it left off. Replies come back as text only: replaying them would mean
+// paying for the speech again.
+async function restoreConversation() {
+  try {
+    const response = await fetch('/api/history');
+    if (!response.ok) return;
+    const { turns } = await response.json();
+    // Something may have been said while this was loading
+    if (transcript.querySelector('.msg')) return;
+    for (const { role, text } of turns) addMessage(role, text);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+restoreConversation();
