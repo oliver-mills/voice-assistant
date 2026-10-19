@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const crypto = require('crypto');
 const { Readable } = require('stream');
 const Anthropic = require('@anthropic-ai/sdk');
 const store = require('./store');
@@ -11,7 +12,10 @@ const app = express();
 // Uploads are held in memory, so cap the size to keep a runaway recording
 // from ballooning the process
 const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+// Only this machine by default. Listening on every interface let anyone on the
+// same network spend the API credits.
+const HOST = process.env.HOST || '127.0.0.1';
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
 
@@ -41,6 +45,27 @@ const BETAS = ['server-side-fallback-2026-07-01'];
 // Searches can pause a turn and tool calls extend it; this stops a
 // pathological loop
 const MAX_TURN_LEGS = 6;
+
+// Every request through here spends someone's API credits, so once the app is
+// reachable beyond this machine it needs a password. Basic auth keeps it to a
+// browser prompt with no login page, and the browser then sends it with every
+// fetch on its own. The username is ignored.
+function requirePassword(req, res, next) {
+  const password = process.env.APP_PASSWORD;
+  if (!password) return next();
+
+  const [scheme, encoded] = (req.get('authorization') || '').split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const supplied = Buffer.from(encoded, 'base64').toString().split(':').slice(1).join(':');
+    // Hashing first gives timingSafeEqual the equal lengths it needs
+    const hash = (value) => crypto.createHash('sha256').update(value).digest();
+    if (crypto.timingSafeEqual(hash(supplied), hash(password))) return next();
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Voice Assistant", charset="UTF-8"');
+  res.status(401).send('Password required');
+}
+app.use(requirePassword);
 
 // Serve only the browser files. Serving the project root also handed out
 // server.js, package.json and anything else that landed next to them.
@@ -442,14 +467,23 @@ app.post('/api/text-to-speech', async (req, res) => {
 
 // Tests load this file for its helpers without starting a server
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const local = ['127.0.0.1', 'localhost', '::1'].includes(HOST);
+  if (!local && !process.env.APP_PASSWORD) {
+    console.error(`Refusing to listen on ${HOST} without APP_PASSWORD set: anyone who`);
+    console.error('could reach it would be spending your API credits.');
+    process.exit(1);
+  }
+
+  app.listen(PORT, HOST, () => {
     // Catch a missing .env now rather than as a confusing 401 mid-conversation
     const missing = ['ELEVENLABS_API_KEY', 'ANTHROPIC_API_KEY', 'VOICE_ID']
       .filter((name) => !process.env[name]);
     if (missing.length) {
       console.warn(`Warning: missing from .env - ${missing.join(', ')}`);
     }
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(local
+      ? `Server running at http://localhost:${PORT}`
+      : `Server listening on ${HOST}:${PORT}, password protected`);
   });
 }
 
