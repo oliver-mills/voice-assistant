@@ -69,7 +69,7 @@ function scrollToBottom() {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
-const WHO = { user: 'you', assistant: 'assistant', error: 'error', timer: 'timer', note: 'note' };
+const WHO = { user: 'You', assistant: 'Assistant', error: 'Error', timer: 'Timer', note: 'Note' };
 
 function clockTime(date = new Date()) {
   return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -184,10 +184,10 @@ function addError(message) {
 // ---------------------------------------------------------------------------
 
 const STATUS_TEXT = {
-  idle: 'ready',
-  transcribing: 'transcribing',
-  thinking: 'thinking',
-  speaking: 'speaking'
+  idle: 'Ready',
+  transcribing: 'Transcribing…',
+  thinking: 'Thinking…',
+  speaking: 'Speaking'
 };
 
 function setMode(next) {
@@ -211,11 +211,11 @@ function setMode(next) {
 
 function updateHint() {
   if (mode === 'speaking' || mode === 'thinking') {
-    hintEl.innerHTML = 'hold <kbd>space</kbd> to interrupt';
+    hintEl.innerHTML = 'Hold <kbd>Space</kbd> to interrupt';
   } else if (handsFreeToggle.checked) {
-    hintEl.innerHTML = 'hands-free on: just start talking<br>or hold <kbd>space</kbd>';
+    hintEl.innerHTML = 'Hands-free is on. Just start talking,<br>or hold <kbd>Space</kbd>.';
   } else {
-    hintEl.innerHTML = 'hold <kbd>space</kbd> or the button to talk';
+    hintEl.innerHTML = 'Hold <kbd>Space</kbd> or the button to talk';
   }
 }
 
@@ -359,7 +359,7 @@ function enqueueSpeech(t, text) {
   if (t.spokenChars + text.length > MAX_SPOKEN_CHARS) {
     if (!t.overBudget) {
       t.overBudget = true;
-      addMessage('note', `reply passed ${MAX_SPOKEN_CHARS} characters; the rest is text only`);
+      addMessage('note', `Reply passed ${MAX_SPOKEN_CHARS} characters, so the rest is text only.`);
     }
     return;
   }
@@ -563,8 +563,8 @@ async function runTurn({ blob, filename, heard, typed }) {
       searches++;
       if (mode === 'thinking') {
         statusEl.textContent = searches > 1
-          ? `searching the web (${searches})`
-          : 'searching the web';
+          ? `Searching the web (${searches})…`
+          : 'Searching the web…';
       }
     });
 
@@ -685,8 +685,8 @@ function useBrowserVoice() {
 }
 
 function updateTelemetry() {
-  telHearing.textContent = useBrowserHearing() ? 'browser · free' : 'elevenlabs';
-  telVoice.textContent = useBrowserVoice() ? 'browser · free' : 'elevenlabs';
+  telHearing.textContent = useBrowserHearing() ? 'Browser (free)' : 'ElevenLabs';
+  telVoice.textContent = useBrowserVoice() ? 'Browser (free)' : 'ElevenLabs';
 }
 
 hearingSelect.addEventListener('change', updateTelemetry);
@@ -746,7 +746,7 @@ function renderMemories(memories) {
     fact.textContent = memory.fact;
     const remove = document.createElement('button');
     remove.className = 'memory-delete';
-    remove.textContent = 'delete';
+    remove.textContent = 'Delete';
     remove.title = 'Forget this';
     remove.addEventListener('click', async () => {
       remove.disabled = true;
@@ -835,7 +835,7 @@ function detachMicFromScope() {
 function readScopeColours() {
   const style = getComputedStyle(document.documentElement);
   const get = (name) => style.getPropertyValue(name).trim();
-  scope.colours = { rec: get('--rec'), accent: get('--accent'), text: get('--muted'), idle: get('--faint') };
+  scope.colours = { rec: get('--rec'), speak: get('--speak'), busy: get('--warn'), idle: get('--faint') };
 }
 readScopeColours();
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', readScopeColours);
@@ -843,19 +843,19 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', readScope
 function scopeSignal() {
   const c = scope.colours;
   if (mode === 'listening') {
-    return { analyser: scope.mic || vad.analyser, colour: c.rec, glow: true, label: 'in · mic' };
+    return { analyser: scope.mic || vad.analyser, colour: c.rec, label: 'Microphone' };
   }
   if (mode === 'speaking') {
     return scope.synthetic || !scope.output
-      ? { pattern: 'voice', colour: c.accent, glow: true, label: 'out · browser voice' }
-      : { analyser: scope.output, colour: c.accent, glow: true, label: 'out · reply' };
+      ? { pattern: 'voice', colour: c.speak, label: 'Browser voice' }
+      : { analyser: scope.output, colour: c.speak, label: 'Reply audio' };
   }
   if (mode === 'thinking' || mode === 'transcribing') {
-    return { pattern: 'pulse', colour: c.text, label: mode };
+    return { pattern: 'pulse', colour: c.busy, label: STATUS_TEXT[mode].replace('…', '') };
   }
   // Hands-free waiting: show the room, so it is obvious the mic is live
-  if (vad.enabled && vad.analyser) return { analyser: vad.analyser, colour: c.idle, label: 'in · room' };
-  return { pattern: 'flat', colour: c.idle, label: 'no signal' };
+  if (vad.enabled && vad.analyser) return { analyser: vad.analyser, colour: c.idle, label: 'Room' };
+  return { pattern: 'flat', colour: c.idle, label: 'No signal' };
 }
 
 // Loudness of the frame in dB below full scale, the way audio meters read
@@ -918,14 +918,12 @@ function drawScope(now) {
   }
 
   g.strokeStyle = signal.colour;
-  g.lineWidth = 1.5;
-  g.shadowColor = signal.colour;
-  g.shadowBlur = signal.glow ? 10 : 0;
+  g.lineWidth = 2;
+  g.lineJoin = 'round';
   g.stroke();
 
   // Corner readouts: what is being shown, and how loud it is
-  g.shadowBlur = 0;
-  g.font = '11px "IBM Plex Mono", ui-monospace, monospace';
+  g.font = '12px ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace';
   g.textBaseline = 'top';
   g.fillStyle = scope.colours.idle;
   g.textAlign = 'left';
@@ -1107,7 +1105,7 @@ function startTimer() {
   startedAt = Date.now();
   timerId = setInterval(() => {
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    statusEl.textContent = `listening ${seconds}s`;
+    statusEl.textContent = `Listening  ${seconds}s`;
   }, 100);
 }
 
@@ -1181,7 +1179,7 @@ function handleRecording(blob, filename) {
 
   if (elapsed < MIN_RECORDING_MS || blob.size === 0) {
     setMode('idle');
-    statusEl.textContent = 'too short: hold a moment longer';
+    statusEl.textContent = 'Too short. Hold a moment longer.';
     setTimeout(() => {
       if (mode === 'idle') statusEl.textContent = STATUS_TEXT.idle;
     }, 1600);

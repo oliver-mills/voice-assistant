@@ -4,62 +4,56 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Voice Assistant</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body data-mode="idle">
   <div class="shell">
     <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-name">voice<span class="slash">/</span>assistant</span>
-      </div>
+      <div class="brand">Voice Assistant</div>
 
       <nav class="top-actions">
         <label class="switch" title="Listen continuously and send when you stop talking">
           <input type="checkbox" id="handsFreeToggle">
           <span class="track"><span class="knob"></span></span>
-          <span class="switch-label">hands-free</span>
+          <span class="switch-label">Hands-free</span>
         </label>
 
         <div class="menu">
           <button class="top-btn" id="memoryBtn" aria-expanded="false" aria-controls="memoryPanel">
-            memory <span class="count" id="memoryCount"></span>
+            Memory <span class="count" id="memoryCount"></span>
           </button>
           <div class="popover" id="memoryPanel" hidden>
             <div class="popover-head">
-              <span>saved about you</span>
-              <span class="popover-note">sent with every message</span>
+              <span>Saved about you</span>
+              <span class="popover-note">Sent with every message</span>
             </div>
             <ul class="memory-list" id="memoryList"></ul>
           </div>
         </div>
 
         <div class="menu">
-          <button class="top-btn" id="settingsBtn" aria-expanded="false" aria-controls="settingsPanel">settings</button>
+          <button class="top-btn" id="settingsBtn" aria-expanded="false" aria-controls="settingsPanel">Settings</button>
           <div class="popover" id="settingsPanel" hidden>
             <label class="field">
-              <span class="field-label">hearing</span>
+              <span class="field-label">Hearing</span>
               <select id="hearingSelect">
-                <option value="browser">browser (free)</option>
-                <option value="elevenlabs">elevenlabs</option>
+                <option value="browser">Browser (free)</option>
+                <option value="elevenlabs">ElevenLabs</option>
               </select>
               <span class="field-help">Speech to text. The browser is free; ElevenLabs uses credits but is more accurate.</span>
             </label>
             <label class="field">
-              <span class="field-label">voice</span>
+              <span class="field-label">Voice</span>
               <select id="voiceSelect">
-                <option value="elevenlabs">elevenlabs</option>
-                <option value="browser">browser (free)</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="browser">Browser (free)</option>
               </select>
               <span class="field-help">Reads replies aloud. ElevenLabs sounds far better; the browser voice costs nothing.</span>
             </label>
           </div>
         </div>
 
-        <button class="top-btn" id="newChatBtn">new chat</button>
+        <button class="top-btn" id="newChatBtn">New chat</button>
       </nav>
     </header>
 
@@ -67,7 +61,7 @@
       <section class="console panel" aria-label="Voice">
         <div class="readout">
           <span class="state-dot" aria-hidden="true"></span>
-          <span id="status" role="status">ready</span>
+          <span id="status" role="status">Ready</span>
         </div>
 
         <div class="scope-wrap">
@@ -78,31 +72,30 @@
           <button id="recordBtn" aria-label="Hold to talk">
             <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2z"/></svg>
           </button>
-          <div class="hint" id="hint">hold <kbd>space</kbd> or the button to talk</div>
+          <div class="hint" id="hint">Hold <kbd>Space</kbd> or the button to talk</div>
         </div>
 
         <dl class="telemetry">
-          <div><dt>hearing</dt><dd id="telHearing">-</dd></div>
-          <div><dt>voice</dt><dd id="telVoice">-</dd></div>
-          <div><dt>first word</dt><dd id="telFirstWord">-</dd></div>
-          <div><dt>first audio</dt><dd id="telFirstAudio">-</dd></div>
+          <div><dt>Hearing</dt><dd id="telHearing">-</dd></div>
+          <div><dt>Voice</dt><dd id="telVoice">-</dd></div>
+          <div><dt>First word</dt><dd id="telFirstWord">-</dd></div>
+          <div><dt>First audio</dt><dd id="telFirstAudio">-</dd></div>
         </dl>
       </section>
 
       <section class="log panel" aria-label="Conversation">
         <div class="log-head">
-          <span>transcript</span>
+          <span>Conversation</span>
           <span class="log-count" id="turnCount"></span>
         </div>
 
         <div id="transcript">
-          <p class="empty-state">No messages yet.<br>Hold <kbd>space</kbd> to talk, or type below.</p>
+          <p class="empty-state">Nothing here yet.<br>Hold <kbd>Space</kbd> to talk, or type below.</p>
         </div>
 
         <form class="composer" id="composer" autocomplete="off">
-          <span class="prompt" aria-hidden="true">&gt;</span>
-          <input id="textInput" type="text" placeholder="type a message" aria-label="Type a message">
-          <button type="submit" id="sendBtn">send <kbd>&crarr;</kbd></button>
+          <input id="textInput" type="text" placeholder="Message the assistant  ( / )" aria-label="Type a message">
+          <button type="submit" id="sendBtn">Send</button>
         </form>
       </section>
     </main>
