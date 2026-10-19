@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@1.0.0", "."],
+      "tools": ["list_directory", "directory_tree", "search_files", "read_text_file", "get_file_info"],
+      "deny": ["\\.env", "(^|[\\\\/])data([\\\\/]|$)", "node_modules"]
+    },
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.83", "--isolated"],
+      "tools": [
+        "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_click",
+        "browser_type", "browser_press_key", "browser_wait_for", "browser_tabs", "browser_close"
+      ]
+    },
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/readonly",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}",
+        "X-MCP-Toolsets": "repos,issues,pull_requests"
+      }
+    }
+  }
+}

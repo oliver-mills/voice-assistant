@@ -23,6 +23,7 @@ const memoryList = document.getElementById('memoryList');
 const memoryCount = document.getElementById('memoryCount');
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
+const servicesList = document.getElementById('servicesList');
 const scopeCanvas = document.getElementById('scope');
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,9 @@ function scrollToBottom() {
 }
 
 const WHO = { user: 'You', assistant: 'Assistant', error: 'Error', timer: 'Timer', note: 'Note' };
+
+// The assistant's own tools get plain names; MCP tools show as "server · tool"
+const LOCAL_TOOL_LABELS = { remember: 'Saved to memory', forget: 'Forgot a fact', set_timer: 'Set a timer' };
 
 function clockTime(date = new Date()) {
   return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -164,6 +168,20 @@ function addMessage(role, text, { pending = false, time = new Date() } = {}) {
       button.addEventListener('click', () => replay(clips));
       meta.append(spacer, button);
     },
+    // Tools and searches the reply used, shown between the name and the text
+    addStep(textLine) {
+      let steps = el.querySelector('.steps');
+      if (!steps) {
+        steps = document.createElement('div');
+        steps.className = 'steps';
+        el.insertBefore(steps, body);
+      }
+      const step = document.createElement('span');
+      step.className = 'step';
+      step.textContent = textLine;
+      steps.appendChild(step);
+      scrollToBottom();
+    },
     attachMetrics(textLine) {
       if (!textLine) return;
       const line = document.createElement('div');
@@ -247,7 +265,7 @@ async function transcribe(blob, filename, signal) {
 }
 
 // Reads the server's SSE stream, handing each token to onDelta as it lands
-async function streamChat(text, signal, onDelta, onSearching) {
+async function streamChat(text, signal, onDelta, onSearching, onTool) {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -292,6 +310,8 @@ async function streamChat(text, signal, onDelta, onSearching) {
         onSearching();
       } else if (name === 'timer') {
         scheduleTimer(payload);
+      } else if (name === 'tool') {
+        onTool(payload);
       } else if (name === 'error') {
         throw new Error(payload.error);
       } else if (name === 'done') {
@@ -561,11 +581,18 @@ async function runTurn({ blob, filename, heard, typed }) {
     }, () => {
       // Searching takes seconds. Without a cue the app just looks frozen.
       searches++;
+      botMsg.addStep('Web search');
       if (mode === 'thinking') {
         statusEl.textContent = searches > 1
           ? `Searching the web (${searches})…`
           : 'Searching the web…';
       }
+    }, ({ name, label }) => {
+      // Same for tool calls, and showing which ones ran is half the point of
+      // connecting MCP servers
+      const text = LOCAL_TOOL_LABELS[name] || label;
+      botMsg.addStep(text);
+      if (mode === 'thinking') statusEl.textContent = `Using ${text}…`;
     });
 
     // Whatever is left after the last sentence terminator still needs speaking
@@ -717,7 +744,43 @@ function setupMenu(button, panel, onOpen) {
   });
 }
 
-setupMenu(settingsBtn, settingsPanel);
+setupMenu(settingsBtn, settingsPanel, () => refreshServices());
+
+// Connected MCP servers, listed in the settings menu
+async function refreshServices() {
+  try {
+    const response = await fetch('/api/mcp');
+    if (!response.ok) return;
+    const { servers } = await response.json();
+    servicesList.replaceChildren();
+
+    if (!servers.length) {
+      const empty = document.createElement('li');
+      empty.className = 'service-empty';
+      empty.textContent = 'None. Add MCP servers in mcp.json.';
+      servicesList.appendChild(empty);
+      return;
+    }
+
+    for (const server of servers) {
+      const item = document.createElement('li');
+      item.className = `service ${server.status}`;
+      const name = document.createElement('span');
+      name.className = 'service-name';
+      name.textContent = server.name;
+      const detail = document.createElement('span');
+      detail.className = 'service-detail';
+      detail.textContent = server.status === 'connected'
+        ? `${server.tools.length} tool${server.tools.length === 1 ? '' : 's'}`
+        : server.error || server.status;
+      detail.title = server.tools.join(', ');
+      item.append(name, detail);
+      servicesList.appendChild(item);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
 setupMenu(memoryBtn, memoryPanel, () => refreshMemories());
 
 document.addEventListener('click', (event) => {

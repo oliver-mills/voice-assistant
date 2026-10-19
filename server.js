@@ -7,6 +7,7 @@ const { Readable } = require('stream');
 const Anthropic = require('@anthropic-ai/sdk');
 const store = require('./store');
 const localTools = require('./tools');
+const mcp = require('./mcp');
 
 const app = express();
 // Uploads are held in memory, so cap the size to keep a runaway recording
@@ -33,18 +34,29 @@ const MAX_TTS_CHARS = 400;
 // max_uses matters more here than in a chat app: every extra search is a few
 // more seconds of silence for someone waiting to be spoken to
 // The rest run here, in tools.js, and their results go back as tool_result.
-const TOOLS = [
+const BASE_TOOLS = [
   { type: 'web_search_20260209', name: 'web_search', max_uses: 3 },
   ...localTools.DEFINITIONS
 ];
+
+// MCP servers connect in the background after startup, so the tool list is
+// built per turn. It is sent with every request and a few MCP servers can make
+// it long, so it is marked for prompt caching: tools come first in the prompt
+// and stay identical from turn to turn, which is exactly what caching needs.
+function currentTools() {
+  const tools = [...BASE_TOOLS, ...mcp.definitions()];
+  const last = tools.length - 1;
+  tools[last] = { ...tools[last], cache_control: { type: 'ephemeral' } };
+  return tools;
+}
 
 // If Claude declines a request on safety grounds, the API reruns it on a
 // fallback model it picks by the kind of refusal, within the same call
 const BETAS = ['server-side-fallback-2026-07-01'];
 
 // Searches can pause a turn and tool calls extend it; this stops a
-// pathological loop
-const MAX_TURN_LEGS = 6;
+// pathological loop. Driving a browser takes several steps, hence the room.
+const MAX_TURN_LEGS = 8;
 
 // Every request through here spends someone's API credits, so once the app is
 // reachable beyond this machine it needs a password. Basic auth keeps it to a
@@ -88,7 +100,12 @@ const SYSTEM_PROMPT = [
   'Keep sourced answers just as short, and say where it came from the way a',
   'person would, such as "according to the BBC". Never read out a URL.',
   'You can save lasting facts about the user, delete them, and set timers.',
-  'After using one of these, confirm it in a few words.'
+  'After using one of these, confirm it in a few words.',
+  'Tools whose names start with a service name and two underscores come from',
+  'connected services, such as files, a browser, or GitHub. Use them when the',
+  'request is about that service. Their results can be long: answer from them',
+  'in a sentence or two, and never read out IDs, hashes, full file paths, or raw',
+  'data. Each tool call adds a pause, so take the fewest steps that answer.'
 ].join(' ');
 
 // The parts that change: the clock, so "in twenty minutes" and "what day is
@@ -241,8 +258,9 @@ app.post('/api/chat', async (req, res) => {
     // expect the partial reply to be sent straight back to be continued.
     const turnMessages = [...messages];
 
-    // Built once per turn so every leg sees the same prompt
+    // Built once per turn so every leg sees the same prompt and tools
     const system = buildSystemPrompt();
+    const tools = currentTools();
 
     for (let leg = 0; leg < MAX_TURN_LEGS; leg++) {
       const stream = anthropic.beta.messages.stream({
@@ -255,7 +273,7 @@ app.post('/api/chat', async (req, res) => {
         max_tokens: 1000,
         system,
         output_config: { effort: EFFORT },
-        tools: TOOLS,
+        tools,
         messages: turnMessages
       });
       currentStream = stream;
@@ -308,20 +326,24 @@ app.post('/api/chat', async (req, res) => {
         break;
       }
 
-      // One of our own tools. Every call in the message gets its result back
-      // in a single user message, then the turn carries on from there.
-      const results = final.content
-        .filter((block) => block.type === 'tool_use')
-        .map((block) => ({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          ...localTools.run(block, {
+      // Tools that run here: ours from tools.js, or an MCP server's. Calls in
+      // one message run in parallel and every result goes back in a single
+      // user message, then the turn carries on from there.
+      const calls = final.content.filter((block) => block.type === 'tool_use');
+      const results = await Promise.all(calls.map(async (block) => {
+        beginStream();
+        sendEvent(res, 'tool', { name: block.name, label: mcp.label(block.name) });
+        const result = mcp.has(block.name)
+          ? await mcp.call(block.name, block.input)
+          : localTools.run(block, {
             onTimer: (timer) => {
               beginStream();
               sendEvent(res, 'timer', timer);
             }
-          })
-        }));
+          });
+        return { type: 'tool_result', tool_use_id: block.id, ...result };
+      }));
+      if (aborted) return;
       turnMessages.push({ role: 'user', content: results });
     }
 
@@ -385,6 +407,11 @@ app.get('/api/history', (req, res) => {
     else turns.push({ role: 'assistant', text });
   }
   res.json({ turns });
+});
+
+// For the settings menu: which MCP servers are connected and their tools
+app.get('/api/mcp', (req, res) => {
+  res.json({ servers: mcp.status() });
 });
 
 // The memory panel: see what has been saved about you, and delete it directly
@@ -496,7 +523,16 @@ if (require.main === module) {
     console.log(local
       ? `Server running at http://localhost:${PORT}`
       : `Server listening on ${HOST}:${PORT}, password protected`);
+    mcp.start();
   });
+
+  // Local MCP servers are child processes; close them rather than orphan them
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      mcp.stop().finally(() => process.exit(0));
+      setTimeout(() => process.exit(0), 3000).unref();
+    });
+  }
 }
 
 module.exports = { app, trimHistory };
