@@ -271,33 +271,6 @@ async function fetchSpeech(text, signal) {
 }
 
 // ---------------------------------------------------------------------------
-// Splitting the reply into speakable chunks
-// ---------------------------------------------------------------------------
-
-// Pulls the next speakable chunk off the front of the buffer, or returns null
-// if what is there so far might still grow into a longer sentence.
-function takeChunk(buffer) {
-  // Requiring whitespace after the terminator keeps "8.8 km" and "3.5" intact
-  const boundary = /[.!?…]["')\]]?(?=\s)/g;
-  let match;
-  while ((match = boundary.exec(buffer))) {
-    const end = match.index + match[0].length;
-    if (end >= MIN_CHUNK_CHARS) {
-      return [buffer.slice(0, end).trim(), buffer.slice(end)];
-    }
-  }
-
-  // No usable sentence end yet. If it has run long, break at a word boundary so
-  // speech isn't held up waiting for a full stop that may be far away.
-  if (buffer.length > MAX_CHUNK_CHARS) {
-    const cut = buffer.lastIndexOf(' ', MAX_CHUNK_CHARS);
-    if (cut > 0) return [buffer.slice(0, cut).trim(), buffer.slice(cut)];
-  }
-
-  return [null, buffer];
-}
-
-// ---------------------------------------------------------------------------
 // A turn: streams the reply while speaking the sentences already finished
 // ---------------------------------------------------------------------------
 
@@ -494,7 +467,7 @@ async function runTurn(blob, filename, heard) {
 
       // Hand each finished sentence to TTS without waiting for the rest
       for (;;) {
-        const [chunk, rest] = takeChunk(buffer);
+        const [chunk, rest] = SpeechUtils.takeChunk(buffer, MIN_CHUNK_CHARS, MAX_CHUNK_CHARS);
         if (!chunk) break;
         buffer = rest;
         if (!spokeAnything) {
@@ -760,14 +733,10 @@ async function startRecording() {
   if (isRecording || wantsToRecord) return;
 
   // Grabbing the button part-way through a hands-free utterance: throw away
-  // what the detector had so far rather than run two recorders on one stream
+  // what the detector had so far and let the button take over
   if (vad.speaking) {
     vad.speaking = false;
-    if (vad.recorder && vad.recorder.state !== 'inactive') {
-      vad.recorder.onstop = null;
-      vad.recorder.stop();
-    }
-    vad.recorder = null;
+    vad.captured = null;
     clearInterval(timerId);
     resetVadCounters();
   }
@@ -855,8 +824,57 @@ const vad = {
   silenceFrames: 0,
   speaking: false,
   utterance: null,
-  recorder: null
+  capture: null,     // worklet node streaming raw samples off the mic
+  preroll: [],       // the last moment of audio before speech was detected
+  prerollLength: 0,
+  captured: null     // sample chunks of the utterance in progress
 };
+
+// Hands-free records raw samples rather than using MediaRecorder. By the time
+// the detector is sure you are talking, the first syllable has already gone
+// past; a rolling buffer of the last half-second lets the clip begin before
+// that, and the trailing silence can be cut instead of sent off and billed.
+const PRE_ROLL_MS = 500;
+const TAIL_KEEP_MS = 300;
+const UPLOAD_SAMPLE_RATE = 16000;
+
+const CAPTURE_WORKLET = `
+  class Capture extends AudioWorkletProcessor {
+    constructor() {
+      super();
+      this.buffer = new Float32Array(2048);
+      this.filled = 0;
+    }
+    process(inputs) {
+      const channel = inputs[0] && inputs[0][0];
+      if (channel) {
+        for (let i = 0; i < channel.length; i++) {
+          this.buffer[this.filled++] = channel[i];
+          if (this.filled === this.buffer.length) {
+            this.port.postMessage(this.buffer.slice());
+            this.filled = 0;
+          }
+        }
+      }
+      return true;
+    }
+  }
+  registerProcessor('capture', Capture);
+`;
+
+function onCaptureChunk(chunk) {
+  if (!vad.context) return; // a last message after hands-free was switched off
+  if (vad.captured) {
+    vad.captured.push(chunk);
+    return;
+  }
+  vad.preroll.push(chunk);
+  vad.prerollLength += chunk.length;
+  const keep = vad.context.sampleRate * PRE_ROLL_MS / 1000;
+  while (vad.preroll.length > 1 && vad.prerollLength - vad.preroll[0].length >= keep) {
+    vad.prerollLength -= vad.preroll.shift().length;
+  }
+}
 
 function resetVadCounters() {
   vad.speechFrames = 0;
@@ -912,43 +930,57 @@ function beginVadUtterance() {
   // Recognition has been running all along; only what follows is this utterance
   if (hearing) hearing.mark();
 
-  vad.recorder = buildRecorder(vad.stream, async (blob, filename) => {
-    // The trailing silence alone makes every clip long enough to pass the
-    // length check, so a cough or a door would cost a transcription. Judge it
-    // on how much of it was voice instead, and drop it without a fuss.
-    if (utterance.voicedFrames < VAD_MIN_VOICED_FRAMES) {
-      recordingHeard = null;
-      setMode('idle');
-      return;
-    }
+  // Start the clip from the buffered moment before speech was detected
+  vad.captured = vad.preroll;
+  vad.preroll = [];
+  vad.prerollLength = 0;
 
-    // Loud but wordless (a TV, a laugh): the browser heard nothing to send, and
-    // hands-free shouldn't put an error in the transcript for every one
-    if (recordingHeard) {
-      const text = await recordingHeard;
-      if (mode !== 'transcribing') return; // the button took over meanwhile
-      if (text === '') {
-        recordingHeard = null;
-        setMode('idle');
-        return;
-      }
-      recordingHeard = Promise.resolve(text);
-    }
-    handleRecording(blob, filename);
-  });
-  vad.recorder.start();
   setMode('listening');
   startTimer();
 }
 
-function endVadUtterance() {
+async function endVadUtterance() {
   vad.speaking = false;
   resetVadCounters();
   clearInterval(timerId);
   recordingHeard = hearing ? hearing.finish() : null;
   setMode('transcribing');
-  if (vad.recorder && vad.recorder.state !== 'inactive') vad.recorder.stop();
-  vad.recorder = null;
+
+  const chunks = vad.captured || [];
+  vad.captured = null;
+  const utterance = vad.utterance;
+  // Read now: hands-free may be switched off while we wait on recognition
+  const rate = vad.context.sampleRate;
+
+  // The trailing silence alone makes every clip long enough to pass the
+  // length check, so a cough or a door would cost a transcription. Judge it
+  // on how much of it was voice instead, and drop it without a fuss.
+  if (!utterance || utterance.voicedFrames < VAD_MIN_VOICED_FRAMES) {
+    recordingHeard = null;
+    setMode('idle');
+    return;
+  }
+
+  // Loud but wordless (a TV, a laugh): the browser heard nothing to send, and
+  // hands-free shouldn't put an error in the transcript for every one
+  if (recordingHeard) {
+    const text = await recordingHeard;
+    if (mode !== 'transcribing') return; // the button took over meanwhile
+    if (text === '') {
+      recordingHeard = null;
+      setMode('idle');
+      return;
+    }
+    recordingHeard = Promise.resolve(text);
+  }
+
+  let samples = SpeechUtils.concatSamples(chunks);
+  const trim = Math.floor(rate * (VAD_END_FRAMES * VAD_FRAME_MS - TAIL_KEEP_MS) / 1000);
+  samples = samples.subarray(0, Math.max(0, samples.length - trim));
+  samples = SpeechUtils.downsample(samples, rate, UPLOAD_SAMPLE_RATE);
+  const wav = SpeechUtils.encodeWav(samples, UPLOAD_SAMPLE_RATE);
+
+  handleRecording(new Blob([wav], { type: 'audio/wav' }), 'recording.wav');
 }
 
 async function enableHandsFree() {
@@ -981,6 +1013,27 @@ async function enableHandsFree() {
   source.connect(vad.analyser);
   vad.samples = new Uint8Array(vad.analyser.fftSize);
 
+  try {
+    const moduleUrl = URL.createObjectURL(
+      new Blob([CAPTURE_WORKLET], { type: 'application/javascript' })
+    );
+    await vad.context.audioWorklet.addModule(moduleUrl);
+    URL.revokeObjectURL(moduleUrl);
+    vad.capture = new AudioWorkletNode(vad.context, 'capture');
+    vad.capture.port.onmessage = (event) => onCaptureChunk(event.data);
+    source.connect(vad.capture);
+    // Some browsers only run a node that leads somewhere; it outputs silence
+    vad.capture.connect(vad.context.destination);
+    // Creating the context after awaiting the mic can leave it suspended
+    await vad.context.resume();
+  } catch (err) {
+    console.error(err);
+    addError('Hands-free is not supported in this browser');
+    handsFreeToggle.checked = false;
+    disableHandsFree();
+    return;
+  }
+
   vad.enabled = true;
   vad.paused = mode !== 'idle';
   vad.calibrationFrames = 0;
@@ -994,7 +1047,11 @@ async function enableHandsFree() {
 
 function disableHandsFree() {
   clearInterval(vad.timer);
-  if (vad.recorder && vad.recorder.state !== 'inactive') vad.recorder.stop();
+  // An utterance in progress is dropped rather than sent
+  if (vad.speaking) {
+    clearInterval(timerId);
+    if (mode === 'listening') setMode('idle');
+  }
   if (vad.stream) vad.stream.getTracks().forEach((track) => track.stop());
   if (vad.context) vad.context.close();
 
@@ -1007,7 +1064,11 @@ function disableHandsFree() {
     samples: null,
     timer: null,
     speaking: false,
-    recorder: null
+    utterance: null,
+    capture: null,
+    preroll: [],
+    prerollLength: 0,
+    captured: null
   });
 
   syncHandsFreeHearing();
