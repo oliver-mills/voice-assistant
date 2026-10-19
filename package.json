@@ -1,7 +1,7 @@
 {
   "name": "voice-assistant",
   "version": "1.0.0",
-  "description": "A browser voice assistant: Claude for the thinking, ElevenLabs or the browser for hearing and speaking",
+  "description": "Experimental browser voice assistant built with Claude, ElevenLabs and MCP",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,8 +12,8 @@
     "url": "git+https://github.com/oliver-mills/voice-assistant.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Oliver Mills",
+  "license": "MIT",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/oliver-mills/voice-assistant/issues"
