@@ -17,12 +17,14 @@ const handsFreeToggle = document.getElementById('handsFreeToggle');
 const MIN_RECORDING_MS = 400;   // anything shorter is an accidental tap
 const MIN_CHUNK_CHARS = 20;     // don't send "Yes." to TTS on its own
 const MAX_CHUNK_CHARS = 220;    // break up a rambling sentence so speech starts
+const TTS_LOOKAHEAD = 1;        // clips rendered ahead of the one playing
 
 // Hands-free voice detection, sampled every VAD_FRAME_MS
 const VAD_FRAME_MS = 50;
 const VAD_CALIBRATION_FRAMES = 20;  // ~1s of room tone before we trust the floor
 const VAD_START_FRAMES = 3;         // ~150ms of speech to open the mic
 const VAD_END_FRAMES = 18;          // ~900ms of silence to close it
+const VAD_MIN_VOICED_FRAMES = 7;    // ~350ms of actual voice, or it was just noise
 
 // ---------------------------------------------------------------------------
 // State
@@ -317,14 +319,22 @@ function notify(t) {
 }
 
 function enqueueSpeech(t, text) {
-  // Fetch starts immediately so several sentences render in parallel, but they
-  // are played strictly in order
-  const urlPromise = fetchSpeech(text, t.controller.signal);
-  // If the turn is cancelled the loop may never await this one, and an aborted
-  // fetch with nobody watching it surfaces as an unhandled rejection
-  urlPromise.catch(() => {});
-  t.queue.push({ text, urlPromise });
+  t.queue.push({ text, urlPromise: null });
+  prefetch(t);
   notify(t);
+}
+
+// A clip is billed when it is requested, not when it is heard. Fetching every
+// sentence up front meant an interruption still paid for the whole reply, so
+// only render a little ahead of what is playing.
+function prefetch(t) {
+  for (const item of t.queue.slice(0, TTS_LOOKAHEAD)) {
+    if (item.urlPromise || t.cancelled) continue;
+    item.urlPromise = fetchSpeech(item.text, t.controller.signal);
+    // If the turn is cancelled the loop may never await this one, and an aborted
+    // fetch with nobody watching it surfaces as an unhandled rejection
+    item.urlPromise.catch(() => {});
+  }
 }
 
 async function playbackLoop(t) {
@@ -335,7 +345,9 @@ async function playbackLoop(t) {
       continue;
     }
 
+    // The head of the queue is always already fetching; this starts the next
     const item = t.queue.shift();
+    prefetch(t);
     let url;
     try {
       url = await item.urlPromise;
@@ -632,6 +644,7 @@ const vad = {
   speechFrames: 0,
   silenceFrames: 0,
   speaking: false,
+  utterance: null,
   recorder: null
 };
 
@@ -673,6 +686,7 @@ function vadFrame() {
     return;
   }
 
+  if (level > threshold) vad.utterance.voicedFrames++;
   vad.silenceFrames = level > threshold ? 0 : vad.silenceFrames + 1;
   if (vad.silenceFrames >= VAD_END_FRAMES) endVadUtterance();
 }
@@ -682,7 +696,18 @@ function beginVadUtterance() {
   resetVadCounters();
   startedAt = Date.now();
 
+  // The frames that opened the mic were voice too
+  const utterance = { voicedFrames: VAD_START_FRAMES };
+  vad.utterance = utterance;
+
   vad.recorder = buildRecorder(vad.stream, (blob, filename) => {
+    // The trailing silence alone makes every clip long enough to pass the
+    // length check, so a cough or a door would cost a transcription. Judge it
+    // on how much of it was voice instead, and drop it without a fuss.
+    if (utterance.voicedFrames < VAD_MIN_VOICED_FRAMES) {
+      setMode('idle');
+      return;
+    }
     handleRecording(blob, filename);
   });
   vad.recorder.start();

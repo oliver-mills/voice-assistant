@@ -19,6 +19,7 @@ const EFFORT = 'low';
 // eleven_flash_v2_5 is noticeably faster if you would rather have speed than
 // the richer voice quality of multilingual_v2
 const TTS_MODEL = process.env.ELEVENLABS_TTS_MODEL || 'eleven_multilingual_v2';
+const MAX_TTS_CHARS = 400;
 
 // Anthropic runs this one on their side: we declare it, they perform the search
 // and feed the results back into the same response. Nothing to execute here.
@@ -184,7 +185,9 @@ app.post('/api/chat', async (req, res) => {
     for (let leg = 0; leg < MAX_TURN_LEGS; leg++) {
       const stream = anthropic.messages.stream({
         model: MODEL,
-        max_tokens: 1000,
+        // Every reply token is a few characters of paid speech. The prompt asks
+        // for four sentences at most, so this only bites on a runaway reply.
+        max_tokens: 400,
         system: SYSTEM_PROMPT,
         output_config: { effort: EFFORT },
         tools: TOOLS,
@@ -268,15 +271,30 @@ app.post('/api/reset', (req, res) => {
 // Proxy route: browser sends one sentence of Claude's reply here, we forward it
 // to ElevenLabs and stream the generated speech audio back
 app.post('/api/text-to-speech', async (req, res) => {
+  const upstream = new AbortController();
   try {
     const { text } = req.body;
 
     if (typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'No text to speak' });
     }
+    // Credits are charged per character, so a runaway request shouldn't be able
+    // to spend a large slice of them at once. The client never sends chunks
+    // this long; this is only a backstop.
+    if (text.length > MAX_TTS_CHARS) {
+      return res.status(413).json({
+        error: `Too long to speak (${text.length} characters, limit ${MAX_TTS_CHARS})`
+      });
+    }
     if (!process.env.VOICE_ID) {
       return res.status(500).json({ error: 'VOICE_ID is not set in .env' });
     }
+
+    // Barge-in cancels the browser's request; pass that on so we stop pulling
+    // audio from ElevenLabs that nobody will hear
+    res.on('close', () => {
+      if (!res.writableEnded) upstream.abort();
+    });
 
     const response = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${process.env.VOICE_ID}/stream`,
@@ -289,7 +307,8 @@ app.post('/api/text-to-speech', async (req, res) => {
         body: JSON.stringify({
           text: text,
           model_id: TTS_MODEL
-        })
+        }),
+        signal: upstream.signal
       }
     );
 
@@ -303,8 +322,13 @@ app.post('/api/text-to-speech', async (req, res) => {
 
     // Pipe the audio through as it arrives rather than buffering the whole clip
     res.set('Content-Type', 'audio/mpeg');
-    Readable.fromWeb(response.body).pipe(res);
+    const audio = Readable.fromWeb(response.body);
+    // Aborting mid-clip errors this stream, and an unhandled stream error would
+    // take the whole server down
+    audio.on('error', () => res.end());
+    audio.pipe(res);
   } catch (err) {
+    if (upstream.signal.aborted) return; // the client left; nothing to report
     console.error(err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Text-to-speech failed' });
