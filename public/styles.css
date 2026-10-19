@@ -81,7 +81,28 @@ header h1 {
   margin: 0;
   letter-spacing: -.01em;
 }
-.header-controls { display: flex; align-items: center; gap: 14px; }
+.header-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+/* Hearing / voice pickers: labelled selects that sit with the other controls */
+.setting { display: inline-flex; align-items: center; gap: 6px; }
+.setting-label { font-size: 13px; color: var(--muted); }
+.setting select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.setting select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .ghost-btn {
   font: inherit;

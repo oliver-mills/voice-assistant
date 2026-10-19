@@ -11,6 +11,20 @@
     <header>
       <h1>Voice Assistant</h1>
       <div class="header-controls">
+        <label class="setting" title="Who turns your speech into text. The browser is free; ElevenLabs uses credits but is more accurate.">
+          <span class="setting-label">Hearing</span>
+          <select id="hearingSelect">
+            <option value="browser">Browser (free)</option>
+            <option value="elevenlabs">ElevenLabs</option>
+          </select>
+        </label>
+        <label class="setting" title="Who reads replies aloud. ElevenLabs sounds far better but uses credits; the browser voice is free.">
+          <span class="setting-label">Voice</span>
+          <select id="voiceSelect">
+            <option value="elevenlabs">ElevenLabs</option>
+            <option value="browser">Browser (free)</option>
+          </select>
+        </label>
         <label class="switch" title="Listen continuously and send when you stop talking">
           <input type="checkbox" id="handsFreeToggle">
           <span class="track"><span class="knob"></span></span>

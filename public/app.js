@@ -9,6 +9,8 @@ const statusEl = document.getElementById('status');
 const hintEl = document.getElementById('hint');
 const newChatBtn = document.getElementById('newChatBtn');
 const handsFreeToggle = document.getElementById('handsFreeToggle');
+const hearingSelect = document.getElementById('hearingSelect');
+const voiceSelect = document.getElementById('voiceSelect');
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -109,12 +111,12 @@ function addMessage(role, text, { pending = false } = {}) {
       el.remove();
     },
     // The reply was spoken as several clips, so replay walks them in order
-    attachAudio(urls) {
-      if (!urls.length) return;
+    attachAudio(clips) {
+      if (!clips.length) return;
       const button = document.createElement('button');
       button.className = 'replay';
       button.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Replay';
-      button.addEventListener('click', () => replay(urls));
+      button.addEventListener('click', () => replay(clips));
       el.appendChild(document.createElement('br'));
       el.appendChild(button);
       scrollToBottom();
@@ -157,6 +159,7 @@ function setMode(next) {
     vad.paused = next !== 'idle';
     if (next === 'idle') resetVadCounters();
   }
+  syncHandsFreeHearing();
 }
 
 function updateHint() {
@@ -302,8 +305,8 @@ function startTurn() {
   const t = {
     controller: new AbortController(),
     cancelled: false,
-    queue: [],        // chunks waiting to be played, each already being fetched
-    urls: [],         // every clip URL, kept for replay and cleanup
+    queue: [],        // chunks waiting to be played, the next one already fetching
+    clips: [],        // everything spoken, as { url } or { text }, for replay
     audio: null,      // the clip currently playing
     streamEnded: false,
     spokenChars: 0,   // characters sent off for speech so far this turn
@@ -324,6 +327,13 @@ function notify(t) {
 }
 
 function enqueueSpeech(t, text) {
+  // The browser's own voice costs nothing, so it needs no fetching or budget
+  if (useBrowserVoice()) {
+    t.queue.push({ text, local: true });
+    notify(t);
+    return;
+  }
+
   if (t.spokenChars + text.length > MAX_SPOKEN_CHARS) {
     if (!t.overBudget) {
       t.overBudget = true;
@@ -342,7 +352,7 @@ function enqueueSpeech(t, text) {
 // only render a little ahead of what is playing.
 function prefetch(t) {
   for (const item of t.queue.slice(0, TTS_LOOKAHEAD)) {
-    if (item.urlPromise || t.cancelled) continue;
+    if (item.local || item.urlPromise || t.cancelled) continue;
     item.urlPromise = fetchSpeech(item.text, t.controller.signal);
     // If the turn is cancelled the loop may never await this one, and an aborted
     // fetch with nobody watching it surfaces as an unhandled rejection
@@ -361,6 +371,13 @@ async function playbackLoop(t) {
     // The head of the queue is always already fetching; this starts the next
     const item = t.queue.shift();
     prefetch(t);
+
+    if (item.local) {
+      t.clips.push({ text: item.text });
+      await speakLocally(item.text);
+      continue;
+    }
+
     let url;
     try {
       url = await item.urlPromise;
@@ -377,10 +394,20 @@ async function playbackLoop(t) {
       return;
     }
 
-    t.urls.push(url);
+    t.clips.push({ url });
     allAudioUrls.push(url);
     await playClip(t, url);
   }
+}
+
+function speakLocally(text) {
+  return new Promise((resolve) => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    // cancel() ends the utterance with an error rather than an end event
+    utterance.onend = resolve;
+    utterance.onerror = resolve;
+    speechSynthesis.speak(utterance);
+  });
 }
 
 function playClip(t, url) {
@@ -402,14 +429,21 @@ function cancelTurn(t) {
     t.audio.pause();
     t.audio = null;
   }
+  if (window.speechSynthesis) speechSynthesis.cancel();
   notify(t);
 }
 
-async function replay(urls) {
+// Replaying never spends credits: ElevenLabs clips are kept from the first
+// play, and browser-voiced ones are just spoken again
+async function replay(clips) {
   cancelTurn(turn);
-  for (const url of urls) {
+  for (const clip of clips) {
+    if (clip.text) {
+      await speakLocally(clip.text);
+      continue;
+    }
     await new Promise((resolve) => {
-      const audio = new Audio(url);
+      const audio = new Audio(clip.url);
       audio.onended = resolve;
       audio.onerror = resolve;
       audio.play().catch(resolve);
@@ -417,7 +451,9 @@ async function replay(urls) {
   }
 }
 
-async function runTurn(blob, filename) {
+// heard is the browser's transcript, if it was listening: a promise of the
+// text, '' for nothing said, or null when it failed and ElevenLabs must step in
+async function runTurn(blob, filename, heard) {
   const t = startTurn();
 
   const userMsg = addMessage('user', '', { pending: true });
@@ -425,7 +461,13 @@ async function runTurn(blob, filename) {
 
   let text;
   try {
-    text = await transcribe(blob, filename, t.controller.signal);
+    text = heard ? await heard : null;
+    if (text === null) {
+      text = await transcribe(blob, filename, t.controller.signal);
+    } else if (!text) {
+      throw new Error('No speech detected');
+    }
+    if (t.cancelled) throw new Error('Cancelled');
     userMsg.setText(text);
   } catch (err) {
     userMsg.remove(); // nothing was said, so don't leave a blank bubble
@@ -503,9 +545,155 @@ async function runTurn(blob, filename) {
     return;
   }
 
-  botMsg.attachAudio(t.urls);
+  botMsg.attachAudio(t.clips);
   turn = null;
   setMode('idle');
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+const BrowserRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// Storage can be missing or throw (private windows, blocked site data); the
+// pickers just fall back to their defaults
+function loadSetting(select, key) {
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved && [...select.options].some((o) => o.value === saved)) select.value = saved;
+  } catch {}
+  select.addEventListener('change', () => {
+    try { localStorage.setItem(key, select.value); } catch {}
+  });
+}
+
+// Firefox has no speech recognition, so there it can only be ElevenLabs
+if (!BrowserRecognition) {
+  hearingSelect.value = 'elevenlabs';
+  hearingSelect.querySelector('option[value="browser"]').disabled = true;
+} else {
+  loadSetting(hearingSelect, 'hearing');
+}
+if (!window.speechSynthesis) {
+  voiceSelect.querySelector('option[value="browser"]').disabled = true;
+} else {
+  loadSetting(voiceSelect, 'voice');
+}
+
+function useBrowserHearing() {
+  return Boolean(BrowserRecognition) && hearingSelect.value === 'browser';
+}
+
+function useBrowserVoice() {
+  return Boolean(window.speechSynthesis) && voiceSelect.value === 'browser';
+}
+
+// ---------------------------------------------------------------------------
+// Browser speech recognition: free transcription, with ElevenLabs as fallback
+// ---------------------------------------------------------------------------
+
+// The live recognition session, if any. The browser runs one at a time.
+let hearing = null;
+// What the session heard for the recording that just ended, handed from the
+// stop handler to the code that runs the turn
+let recordingHeard = null;
+
+// Listens until finish() or cancel(). finish() resolves to what was said, ''
+// if nothing was, or null if recognition broke and the recording should go to
+// ElevenLabs instead.
+function startHearing() {
+  cancelHearing();
+
+  const session = {
+    parts: [],       // final phrases, in order
+    base: 0,         // where this browser session's results start in parts
+    markAt: 0,       // only phrases from here on belong to the utterance
+    failed: false,
+    stopping: false,
+    cancelled: false
+  };
+  let resolveEnded;
+  const ended = new Promise((resolve) => { resolveEnded = resolve; });
+
+  const recognition = new BrowserRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.lang = navigator.language || 'en-US';
+
+  recognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) {
+        session.parts[session.base + i] = event.results[i][0].transcript;
+      }
+    }
+  };
+
+  recognition.onerror = (event) => {
+    // no-speech is just a quiet stretch, and aborted is us cancelling
+    if (event.error === 'no-speech' || event.error === 'aborted') return;
+    console.warn('Browser speech recognition failed:', event.error);
+    session.failed = true;
+  };
+
+  recognition.onend = () => {
+    // Chrome ends continuous sessions on its own after a while; keep going
+    // until we actually ask it to stop. Results restart from 0 in the new one.
+    if (!session.stopping && !session.cancelled && !session.failed) {
+      session.base = session.parts.length;
+      try {
+        recognition.start();
+        return;
+      } catch (err) {
+        session.failed = true;
+      }
+    }
+    resolveEnded();
+  };
+
+  try {
+    recognition.start();
+  } catch (err) {
+    console.warn(err);
+    session.failed = true;
+    resolveEnded();
+  }
+
+  session.mark = () => {
+    session.markAt = session.parts.length;
+  };
+
+  session.finish = async () => {
+    session.stopping = true;
+    if (hearing === session) hearing = null;
+    recognition.stop(); // flushes whatever is still being recognised
+    // A browser that never fires end shouldn't hang the turn
+    await Promise.race([ended, new Promise((r) => setTimeout(r, 2500))]);
+    if (session.failed) return null;
+    return session.parts.slice(session.markAt).filter(Boolean).join(' ').trim();
+  };
+
+  session.cancel = () => {
+    session.cancelled = true;
+    if (hearing === session) hearing = null;
+    recognition.abort();
+  };
+
+  hearing = session;
+  return session;
+}
+
+function cancelHearing() {
+  if (hearing) hearing.cancel();
+}
+
+// Hands-free keeps a session open whenever it is waiting for you, so the start
+// of what you say is heard rather than lost while recognition spins up. It is
+// shut while the assistant talks so it never transcribes its own voice.
+function syncHandsFreeHearing() {
+  const wanted = vad.enabled && mode === 'idle' && useBrowserHearing();
+  if (wanted && !hearing) startHearing();
+  if (!wanted && hearing && mode !== 'listening') cancelHearing();
 }
 
 // ---------------------------------------------------------------------------
@@ -591,11 +779,16 @@ async function startRecording() {
   wantsToRecord = true;
   if (vad.enabled) vad.paused = true;
 
+  // Start listening before the mic is ready so the first word isn't lost
+  if (useBrowserHearing()) startHearing();
+  else cancelHearing();
+
   try {
     const stream = await acquireStream();
 
     // The button may already have been released while we waited on the mic
     if (!wantsToRecord) {
+      cancelHearing();
       releaseStream();
       return;
     }
@@ -607,6 +800,7 @@ async function startRecording() {
     startTimer();
   } catch (err) {
     wantsToRecord = false;
+    cancelHearing();
     releaseStream();
     setMode('idle');
     addError('Mic permission denied or unavailable');
@@ -620,12 +814,15 @@ function stopRecording() {
 
   isRecording = false;
   clearInterval(timerId);
+  recordingHeard = hearing ? hearing.finish() : null;
   setMode('transcribing');
   mediaRecorder.stop(); // triggers the onstop handler, which builds the Blob
 }
 
 function handleRecording(blob, filename) {
   const elapsed = Date.now() - startedAt;
+  const heard = recordingHeard;
+  recordingHeard = null;
   releaseStream();
 
   if (elapsed < MIN_RECORDING_MS || blob.size === 0) {
@@ -637,7 +834,7 @@ function handleRecording(blob, filename) {
     return;
   }
 
-  runTurn(blob, filename);
+  runTurn(blob, filename, heard);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,14 +909,30 @@ function beginVadUtterance() {
   // The frames that opened the mic were voice too
   const utterance = { voicedFrames: VAD_START_FRAMES };
   vad.utterance = utterance;
+  // Recognition has been running all along; only what follows is this utterance
+  if (hearing) hearing.mark();
 
-  vad.recorder = buildRecorder(vad.stream, (blob, filename) => {
+  vad.recorder = buildRecorder(vad.stream, async (blob, filename) => {
     // The trailing silence alone makes every clip long enough to pass the
     // length check, so a cough or a door would cost a transcription. Judge it
     // on how much of it was voice instead, and drop it without a fuss.
     if (utterance.voicedFrames < VAD_MIN_VOICED_FRAMES) {
+      recordingHeard = null;
       setMode('idle');
       return;
+    }
+
+    // Loud but wordless (a TV, a laugh): the browser heard nothing to send, and
+    // hands-free shouldn't put an error in the transcript for every one
+    if (recordingHeard) {
+      const text = await recordingHeard;
+      if (mode !== 'transcribing') return; // the button took over meanwhile
+      if (text === '') {
+        recordingHeard = null;
+        setMode('idle');
+        return;
+      }
+      recordingHeard = Promise.resolve(text);
     }
     handleRecording(blob, filename);
   });
@@ -732,6 +945,7 @@ function endVadUtterance() {
   vad.speaking = false;
   resetVadCounters();
   clearInterval(timerId);
+  recordingHeard = hearing ? hearing.finish() : null;
   setMode('transcribing');
   if (vad.recorder && vad.recorder.state !== 'inactive') vad.recorder.stop();
   vad.recorder = null;
@@ -774,6 +988,7 @@ async function enableHandsFree() {
   resetVadCounters();
   vad.timer = setInterval(vadFrame, VAD_FRAME_MS);
 
+  syncHandsFreeHearing();
   updateHint();
 }
 
@@ -795,6 +1010,7 @@ function disableHandsFree() {
     recorder: null
   });
 
+  syncHandsFreeHearing();
   updateHint();
 }
 
@@ -824,6 +1040,8 @@ window.addEventListener('keyup', (event) => {
     stopRecording();
   }
 });
+
+hearingSelect.addEventListener('change', syncHandsFreeHearing);
 
 handsFreeToggle.addEventListener('change', () => {
   if (handsFreeToggle.checked) enableHandsFree();
