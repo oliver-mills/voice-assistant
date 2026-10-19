@@ -88,6 +88,20 @@ test('server files are not served to the browser', async () => {
   assert.strictEqual((await realFetch(`${base}/app.js`)).status, 200);
 });
 
+test('memory panel can list and delete saved facts', async () => {
+  const tools = require('../tools');
+  tools.run({ name: 'remember', input: { fact: 'Prefers tea' } }, { onTimer() {} });
+
+  const { memories } = await (await realFetch(`${base}/api/memories`)).json();
+  const tea = memories.find((m) => m.fact === 'Prefers tea');
+  assert.ok(tea);
+
+  const del = (id) => realFetch(`${base}/api/memories/${id}`, { method: 'DELETE' });
+  assert.strictEqual((await del(tea.id)).status, 200);
+  assert.strictEqual((await del(tea.id)).status, 404);
+  assert.doesNotMatch(tools.describeMemories(), /Prefers tea/);
+});
+
 test('APP_PASSWORD gates every route', async () => {
   process.env.APP_PASSWORD = 'correct horse';
   try {

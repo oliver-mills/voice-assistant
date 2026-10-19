@@ -78,6 +78,19 @@ function describeMemories() {
   ].join('\n');
 }
 
+// Shared by the forget tool and the memory panel in the page
+function listMemories() {
+  return memories.map(({ id, fact, savedAt }) => ({ id, fact, savedAt }));
+}
+
+function removeMemory(id) {
+  const index = memories.findIndex((m) => m.id === id);
+  if (index === -1) return null;
+  const [removed] = memories.splice(index, 1);
+  store.save('memories', memories);
+  return removed;
+}
+
 function nextId() {
   return memories.reduce((max, m) => Math.max(max, m.id), 0) + 1;
 }
@@ -107,10 +120,8 @@ function run(block, { onTimer }) {
     }
 
     case 'forget': {
-      const index = memories.findIndex((m) => m.id === input.id);
-      if (index === -1) return fail(`No saved fact has id ${input.id}`);
-      const [removed] = memories.splice(index, 1);
-      store.save('memories', memories);
+      const removed = removeMemory(input.id);
+      if (!removed) return fail(`No saved fact has id ${input.id}`);
       return { content: `Forgot: ${removed.fact}` };
     }
 
@@ -129,4 +140,4 @@ function run(block, { onTimer }) {
   }
 }
 
-module.exports = { DEFINITIONS, run, describeMemories };
+module.exports = { DEFINITIONS, run, describeMemories, listMemories, removeMemory };

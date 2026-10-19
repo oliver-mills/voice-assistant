@@ -4,13 +4,26 @@
 
 const transcript = document.getElementById('transcript');
 const recordBtn = document.getElementById('recordBtn');
-const micWrap = document.getElementById('micWrap');
 const statusEl = document.getElementById('status');
 const hintEl = document.getElementById('hint');
 const newChatBtn = document.getElementById('newChatBtn');
 const handsFreeToggle = document.getElementById('handsFreeToggle');
 const hearingSelect = document.getElementById('hearingSelect');
 const voiceSelect = document.getElementById('voiceSelect');
+const composer = document.getElementById('composer');
+const textInput = document.getElementById('textInput');
+const turnCountEl = document.getElementById('turnCount');
+const telHearing = document.getElementById('telHearing');
+const telVoice = document.getElementById('telVoice');
+const telFirstWord = document.getElementById('telFirstWord');
+const telFirstAudio = document.getElementById('telFirstAudio');
+const memoryBtn = document.getElementById('memoryBtn');
+const memoryPanel = document.getElementById('memoryPanel');
+const memoryList = document.getElementById('memoryList');
+const memoryCount = document.getElementById('memoryCount');
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsPanel = document.getElementById('settingsPanel');
+const scopeCanvas = document.getElementById('scope');
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -56,13 +69,39 @@ function scrollToBottom() {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
-// Returns a handle rather than the raw node, so callers can keep appending to a
-// bubble as tokens stream in without re-querying the DOM
-function addMessage(role, text, { pending = false } = {}) {
+const WHO = { user: 'you', assistant: 'assistant', error: 'error', timer: 'timer', note: 'note' };
+
+function clockTime(date = new Date()) {
+  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function updateTurnCount() {
+  const count = transcript.querySelectorAll('.msg.user').length;
+  turnCountEl.textContent = count ? `${count} turn${count === 1 ? '' : 's'}` : '';
+}
+
+// Returns a handle rather than the raw node, so callers can keep appending to
+// an entry as tokens stream in without re-querying the DOM.
+// time is null for restored history, which has no timestamps.
+function addMessage(role, text, { pending = false, time = new Date() } = {}) {
   const el = document.createElement('div');
   el.className = `msg ${role}`;
 
-  const body = document.createElement('span');
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.textContent = WHO[role] || role;
+  meta.appendChild(who);
+  if (time) {
+    const stamp = document.createElement('span');
+    stamp.className = 'time';
+    stamp.textContent = clockTime(time);
+    meta.appendChild(stamp);
+  }
+  el.appendChild(meta);
+
+  const body = document.createElement('div');
   body.className = 'body';
   if (pending) {
     body.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
@@ -73,6 +112,7 @@ function addMessage(role, text, { pending = false } = {}) {
 
   transcript.appendChild(el);
   transcript.classList.add('has-messages');
+  updateTurnCount();
   scrollToBottom();
 
   let content = pending ? '' : text;
@@ -104,21 +144,32 @@ function addMessage(role, text, { pending = false } = {}) {
     },
     fail(message) {
       el.className = 'msg error';
+      who.textContent = WHO.error;
       body.textContent = message;
       scrollToBottom();
     },
     remove() {
       el.remove();
+      updateTurnCount();
+      if (!transcript.querySelector('.msg')) transcript.classList.remove('has-messages');
     },
     // The reply was spoken as several clips, so replay walks them in order
     attachAudio(clips) {
       if (!clips.length) return;
+      const spacer = document.createElement('span');
+      spacer.className = 'spacer';
       const button = document.createElement('button');
       button.className = 'replay';
-      button.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Replay';
+      button.textContent = 'replay';
       button.addEventListener('click', () => replay(clips));
-      el.appendChild(document.createElement('br'));
-      el.appendChild(button);
+      meta.append(spacer, button);
+    },
+    attachMetrics(textLine) {
+      if (!textLine) return;
+      const line = document.createElement('div');
+      line.className = 'metrics';
+      line.textContent = textLine;
+      el.appendChild(line);
       scrollToBottom();
     }
   };
@@ -133,21 +184,17 @@ function addError(message) {
 // ---------------------------------------------------------------------------
 
 const STATUS_TEXT = {
-  idle: 'Ready',
-  transcribing: 'Transcribing...',
-  thinking: 'Thinking...',
-  speaking: 'Speaking - press to interrupt'
+  idle: 'ready',
+  transcribing: 'transcribing',
+  thinking: 'thinking',
+  speaking: 'speaking'
 };
 
 function setMode(next) {
   mode = next;
 
-  micWrap.classList.toggle('recording', next === 'listening');
-  recordBtn.classList.toggle('recording', next === 'listening');
-  micWrap.classList.toggle('speaking', next === 'speaking');
-  recordBtn.classList.toggle('speaking', next === 'speaking');
-  statusEl.classList.toggle('live', next === 'listening');
-  statusEl.classList.toggle('talking', next === 'speaking');
+  // All the styling for a state hangs off this one attribute
+  document.body.dataset.mode = next;
 
   if (next !== 'listening') statusEl.textContent = STATUS_TEXT[next] || '';
 
@@ -163,12 +210,12 @@ function setMode(next) {
 }
 
 function updateHint() {
-  if (handsFreeToggle.checked) {
-    hintEl.textContent = mode === 'idle'
-      ? 'listening - just start talking'
-      : 'hold the button to interrupt';
+  if (mode === 'speaking' || mode === 'thinking') {
+    hintEl.innerHTML = 'hold <kbd>space</kbd> to interrupt';
+  } else if (handsFreeToggle.checked) {
+    hintEl.innerHTML = 'hands-free on: just start talking<br>or hold <kbd>space</kbd>';
   } else {
-    hintEl.innerHTML = 'hold the button or <kbd>space</kbd>';
+    hintEl.innerHTML = 'hold <kbd>space</kbd> or the button to talk';
   }
 }
 
@@ -312,7 +359,7 @@ function enqueueSpeech(t, text) {
   if (t.spokenChars + text.length > MAX_SPOKEN_CHARS) {
     if (!t.overBudget) {
       t.overBudget = true;
-      addError('Reply was long, so the rest is text only');
+      addMessage('note', `reply passed ${MAX_SPOKEN_CHARS} characters; the rest is text only`);
     }
     return;
   }
@@ -349,6 +396,7 @@ async function playbackLoop(t) {
 
     if (item.local) {
       t.clips.push({ text: item.text });
+      markTime(t, 'voice');
       await speakLocally(item.text);
       continue;
     }
@@ -371,6 +419,7 @@ async function playbackLoop(t) {
 
     t.clips.push({ url });
     allAudioUrls.push(url);
+    markTime(t, 'voice');
     await playClip(t, url);
   }
 }
@@ -378,22 +427,48 @@ async function playbackLoop(t) {
 function speakLocally(text) {
   return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(text);
+    // The browser voice can't be measured, so the scope animates instead
+    scope.synthetic = true;
+    const done = () => {
+      scope.synthetic = false;
+      resolve();
+    };
     // cancel() ends the utterance with an error rather than an end event
-    utterance.onend = resolve;
-    utterance.onerror = resolve;
+    utterance.onend = done;
+    utterance.onerror = done;
     speechSynthesis.speak(utterance);
   });
 }
 
-function playClip(t, url) {
+function playAudio(url, onCreate) {
   return new Promise((resolve) => {
     const audio = new Audio(url);
-    t.audio = audio;
+    if (onCreate) onCreate(audio);
+    routeToScope(audio);
     audio.onended = resolve;
     // A blocked autoplay shouldn't stall the queue; the replay button still works
     audio.onerror = resolve;
     audio.play().catch(resolve);
   });
+}
+
+function playClip(t, url) {
+  return playAudio(url, (audio) => { t.audio = audio; });
+}
+
+function markTime(t, name) {
+  if (t.marks && !(name in t.marks)) t.marks[name] = performance.now();
+}
+
+// "hearing 0.42s · first word 1.10s · voice 1.52s", each measured from the
+// moment the turn started (when you stopped talking, or pressed enter)
+function describeTimings(marks) {
+  const since = (name) => `${((marks[name] - marks.start) / 1000).toFixed(2)}s`;
+  const parts = [];
+  if ('heard' in marks) parts.push(`hearing ${since('heard')}`);
+  if ('firstWord' in marks) parts.push(`first word ${since('firstWord')}`);
+  if ('voice' in marks) parts.push(`voice ${since('voice')}`);
+  return parts.join(' · ');
 }
 
 function cancelTurn(t) {
@@ -417,41 +492,45 @@ async function replay(clips) {
       await speakLocally(clip.text);
       continue;
     }
-    await new Promise((resolve) => {
-      const audio = new Audio(clip.url);
-      audio.onended = resolve;
-      audio.onerror = resolve;
-      audio.play().catch(resolve);
-    });
+    await playAudio(clip.url);
   }
 }
 
+// One exchange, from either a recording or typed text.
 // heard is the browser's transcript, if it was listening: a promise of the
-// text, '' for nothing said, or null when it failed and ElevenLabs must step in
-async function runTurn(blob, filename, heard) {
+// text, '' for nothing said, or null when it failed and ElevenLabs must step in.
+// typed skips hearing altogether, which also makes it free.
+async function runTurn({ blob, filename, heard, typed }) {
   const t = startTurn();
-
-  const userMsg = addMessage('user', '', { pending: true });
-  setMode('transcribing');
+  t.marks = { start: performance.now() };
 
   let text;
-  try {
-    text = heard ? await heard : null;
-    if (text === null) {
-      text = await transcribe(blob, filename, t.controller.signal);
-    } else if (!text) {
-      throw new Error('No speech detected');
+  if (typed) {
+    text = typed;
+    addMessage('user', text);
+  } else {
+    const userMsg = addMessage('user', '', { pending: true });
+    setMode('transcribing');
+
+    try {
+      text = heard ? await heard : null;
+      if (text === null) {
+        text = await transcribe(blob, filename, t.controller.signal);
+      } else if (!text) {
+        throw new Error('No speech detected');
+      }
+      if (t.cancelled) throw new Error('Cancelled');
+      userMsg.setText(text);
+      markTime(t, 'heard');
+    } catch (err) {
+      userMsg.remove(); // nothing was said, so don't leave a blank entry
+      if (!t.cancelled) {
+        addError(err.message);
+        console.error(err);
+        setMode('idle');
+      }
+      return;
     }
-    if (t.cancelled) throw new Error('Cancelled');
-    userMsg.setText(text);
-  } catch (err) {
-    userMsg.remove(); // nothing was said, so don't leave a blank bubble
-    if (!t.cancelled) {
-      addError(err.message);
-      console.error(err);
-      setMode('idle');
-    }
-    return;
   }
 
   const botMsg = addMessage('assistant', '', { pending: true });
@@ -464,6 +543,7 @@ async function runTurn(blob, filename, heard) {
 
   try {
     await streamChat(text, t.controller.signal, (delta) => {
+      markTime(t, 'firstWord');
       botMsg.append(delta);
       buffer += delta;
 
@@ -483,8 +563,8 @@ async function runTurn(blob, filename, heard) {
       searches++;
       if (mode === 'thinking') {
         statusEl.textContent = searches > 1
-          ? `Searching the web (${searches})...`
-          : 'Searching the web...';
+          ? `searching the web (${searches})`
+          : 'searching the web';
       }
     });
 
@@ -521,8 +601,16 @@ async function runTurn(blob, filename, heard) {
   }
 
   botMsg.attachAudio(t.clips);
+  botMsg.attachMetrics(describeTimings(t.marks));
+  const since = (name) => (name in t.marks
+    ? `${((t.marks[name] - t.marks.start) / 1000).toFixed(2)}s`
+    : '-');
+  telFirstWord.textContent = since('firstWord');
+  telFirstAudio.textContent = since('voice');
   turn = null;
   setMode('idle');
+  // The reply may have saved or forgotten something
+  refreshMemories();
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +682,265 @@ function useBrowserHearing() {
 
 function useBrowserVoice() {
   return Boolean(window.speechSynthesis) && voiceSelect.value === 'browser';
+}
+
+function updateTelemetry() {
+  telHearing.textContent = useBrowserHearing() ? 'browser · free' : 'elevenlabs';
+  telVoice.textContent = useBrowserVoice() ? 'browser · free' : 'elevenlabs';
+}
+
+hearingSelect.addEventListener('change', updateTelemetry);
+voiceSelect.addEventListener('change', updateTelemetry);
+updateTelemetry();
+
+// ---------------------------------------------------------------------------
+// Top bar menus: settings and memory
+// ---------------------------------------------------------------------------
+
+const menus = [[settingsBtn, settingsPanel], [memoryBtn, memoryPanel]];
+
+function closeMenus() {
+  for (const [button, panel] of menus) {
+    panel.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function setupMenu(button, panel, onOpen) {
+  button.addEventListener('click', () => {
+    const opening = panel.hidden;
+    closeMenus();
+    if (!opening) return;
+    panel.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    if (onOpen) onOpen();
+  });
+}
+
+setupMenu(settingsBtn, settingsPanel);
+setupMenu(memoryBtn, memoryPanel, () => refreshMemories());
+
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.menu')) closeMenus();
+});
+
+function renderMemories(memories) {
+  memoryCount.textContent = memories.length || '';
+  memoryList.replaceChildren();
+
+  if (!memories.length) {
+    const empty = document.createElement('li');
+    empty.className = 'memory-empty';
+    empty.textContent = 'Nothing saved yet. Say "remember that..." to add something.';
+    memoryList.appendChild(empty);
+    return;
+  }
+
+  for (const memory of memories) {
+    const item = document.createElement('li');
+    const id = document.createElement('span');
+    id.className = 'memory-id';
+    id.textContent = `#${memory.id}`;
+    const fact = document.createElement('span');
+    fact.className = 'memory-fact';
+    fact.textContent = memory.fact;
+    const remove = document.createElement('button');
+    remove.className = 'memory-delete';
+    remove.textContent = 'delete';
+    remove.title = 'Forget this';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        const response = await fetch(`/api/memories/${memory.id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(`Could not delete (${response.status})`);
+      } catch (err) {
+        addError(err.message);
+      }
+      refreshMemories();
+    });
+    item.append(id, fact, remove);
+    memoryList.appendChild(item);
+  }
+}
+
+async function refreshMemories() {
+  try {
+    const response = await fetch('/api/memories');
+    if (!response.ok) return;
+    const { memories } = await response.json();
+    renderMemories(memories);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scope: draws the real signal, the mic while you talk and the reply while it
+// plays, so the display is a reading rather than decoration
+// ---------------------------------------------------------------------------
+
+const scope = {
+  ctx: scopeCanvas.getContext('2d'),
+  audio: null,       // shared AudioContext for measuring playback and the mic
+  output: null,      // analyser on everything the assistant plays
+  mic: null,         // analyser on the push-to-talk mic, while it is held
+  micSource: null,
+  buffer: new Uint8Array(2048),
+  synthetic: false,  // the browser voice can't be measured, so animate instead
+  colours: {}
+};
+
+// Browsers only start audio after a click or key press, so the shared context
+// is created, or woken, inside one
+function wakeAudio() {
+  try {
+    if (!scope.audio) {
+      scope.audio = new (window.AudioContext || window.webkitAudioContext)();
+      scope.output = scope.audio.createAnalyser();
+      scope.output.fftSize = 1024;
+      scope.output.connect(scope.audio.destination);
+    }
+    if (scope.audio.state === 'suspended') scope.audio.resume();
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+// Routing into a context that isn't running would play silence, so only
+// measure playback once it is; otherwise the clip just plays as normal
+function routeToScope(audio) {
+  if (!scope.audio || scope.audio.state !== 'running') return;
+  try {
+    scope.audio.createMediaElementSource(audio).connect(scope.output);
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+function attachMicToScope(stream) {
+  detachMicFromScope();
+  if (!scope.audio || scope.audio.state !== 'running') return;
+  scope.micSource = scope.audio.createMediaStreamSource(stream);
+  scope.mic = scope.audio.createAnalyser();
+  scope.mic.fftSize = 1024;
+  scope.micSource.connect(scope.mic); // measured only, never played back
+}
+
+function detachMicFromScope() {
+  if (scope.micSource) scope.micSource.disconnect();
+  scope.micSource = null;
+  scope.mic = null;
+}
+
+function readScopeColours() {
+  const style = getComputedStyle(document.documentElement);
+  const get = (name) => style.getPropertyValue(name).trim();
+  scope.colours = { rec: get('--rec'), accent: get('--accent'), text: get('--muted'), idle: get('--faint') };
+}
+readScopeColours();
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', readScopeColours);
+
+function scopeSignal() {
+  const c = scope.colours;
+  if (mode === 'listening') {
+    return { analyser: scope.mic || vad.analyser, colour: c.rec, glow: true, label: 'in · mic' };
+  }
+  if (mode === 'speaking') {
+    return scope.synthetic || !scope.output
+      ? { pattern: 'voice', colour: c.accent, glow: true, label: 'out · browser voice' }
+      : { analyser: scope.output, colour: c.accent, glow: true, label: 'out · reply' };
+  }
+  if (mode === 'thinking' || mode === 'transcribing') {
+    return { pattern: 'pulse', colour: c.text, label: mode };
+  }
+  // Hands-free waiting: show the room, so it is obvious the mic is live
+  if (vad.enabled && vad.analyser) return { analyser: vad.analyser, colour: c.idle, label: 'in · room' };
+  return { pattern: 'flat', colour: c.idle, label: 'no signal' };
+}
+
+// Loudness of the frame in dB below full scale, the way audio meters read
+function levelDb(samples) {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const centred = (samples[i] - 128) / 128;
+    sum += centred * centred;
+  }
+  const rms = Math.sqrt(sum / samples.length);
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
+
+function drawScope(now) {
+  const dpr = window.devicePixelRatio || 1;
+  const width = scopeCanvas.clientWidth;
+  const height = scopeCanvas.clientHeight;
+  if (scopeCanvas.width !== Math.round(width * dpr) || scopeCanvas.height !== Math.round(height * dpr)) {
+    scopeCanvas.width = Math.round(width * dpr);
+    scopeCanvas.height = Math.round(height * dpr);
+  }
+
+  const g = scope.ctx;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, width, height);
+
+  const signal = scopeSignal();
+  const mid = height / 2;
+  const amplitude = height * 0.42;
+  const steps = Math.max(64, Math.floor(width / 3));
+
+  let samples = null;
+  if (signal.analyser) {
+    samples = scope.buffer.subarray(0, signal.analyser.fftSize);
+    signal.analyser.getByteTimeDomainData(samples);
+  }
+
+  g.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * width;
+    const along = i / steps;
+    let value = 0;
+
+    if (samples) {
+      // Speech is quiet next to full scale; boost it so it reads at a glance
+      value = Math.max(-1, Math.min(1, ((samples[Math.floor(along * (samples.length - 1))] - 128) / 128) * 2.2));
+    } else if (signal.pattern === 'pulse') {
+      // A packet travelling left to right: something is happening, no signal yet
+      const position = ((now / 1600) % 1.4) - 0.2;
+      const envelope = Math.exp(-((along - position) ** 2) / 0.006);
+      value = envelope * 0.35 * Math.sin(along * 90 - now / 60);
+    } else if (signal.pattern === 'voice') {
+      const swell = 0.25 + 0.2 * Math.sin(now / 310);
+      value = Math.sin(along * 40 + now / 90) * swell * Math.sin(along * Math.PI);
+    }
+
+    const y = mid - value * amplitude;
+    if (i === 0) g.moveTo(x, y);
+    else g.lineTo(x, y);
+  }
+
+  g.strokeStyle = signal.colour;
+  g.lineWidth = 1.5;
+  g.shadowColor = signal.colour;
+  g.shadowBlur = signal.glow ? 10 : 0;
+  g.stroke();
+
+  // Corner readouts: what is being shown, and how loud it is
+  g.shadowBlur = 0;
+  g.font = '11px "IBM Plex Mono", ui-monospace, monospace';
+  g.textBaseline = 'top';
+  g.fillStyle = scope.colours.idle;
+  g.textAlign = 'left';
+  g.fillText(signal.label, 12, 10);
+  if (samples) {
+    // Smoothed so the number is readable rather than a blur
+    const db = Math.max(-60, levelDb(samples));
+    scope.db = scope.db === undefined ? db : scope.db * 0.85 + db * 0.15;
+    g.textAlign = 'right';
+    g.fillText(scope.db <= -59 ? '< -60 dB' : `${scope.db.toFixed(0)} dB`, width - 12, 10);
+  } else {
+    scope.db = undefined;
+  }
+
+  requestAnimationFrame(drawScope);
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +1096,7 @@ async function acquireStream() {
 }
 
 function releaseStream() {
+  detachMicFromScope();
   if (pushToTalkStream) {
     pushToTalkStream.getTracks().forEach((track) => track.stop());
     pushToTalkStream = null;
@@ -759,12 +1107,14 @@ function startTimer() {
   startedAt = Date.now();
   timerId = setInterval(() => {
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    statusEl.textContent = `Listening  ${seconds}s`;
+    statusEl.textContent = `listening ${seconds}s`;
   }, 100);
 }
 
 async function startRecording() {
   if (isRecording || wantsToRecord) return;
+  wakeAudio();
+  closeMenus();
 
   // Grabbing the button part-way through a hands-free utterance: throw away
   // what the detector had so far and let the button take over
@@ -796,6 +1146,7 @@ async function startRecording() {
       return;
     }
 
+    attachMicToScope(stream);
     mediaRecorder = buildRecorder(stream, handleRecording);
     mediaRecorder.start();
     isRecording = true;
@@ -830,14 +1181,14 @@ function handleRecording(blob, filename) {
 
   if (elapsed < MIN_RECORDING_MS || blob.size === 0) {
     setMode('idle');
-    statusEl.textContent = 'Hold a moment longer';
+    statusEl.textContent = 'too short: hold a moment longer';
     setTimeout(() => {
       if (mode === 'idle') statusEl.textContent = STATUS_TEXT.idle;
     }, 1600);
     return;
   }
 
-  runTurn(blob, filename, heard);
+  runTurn({ blob, filename, heard });
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,22 +1474,57 @@ recordBtn.addEventListener('pointerdown', (event) => {
 window.addEventListener('pointerup', stopRecording);
 window.addEventListener('pointercancel', stopRecording);
 
+// Space typed into the text box, a select or the hands-free checkbox is just
+// a space, not push-to-talk
+function inField(event) {
+  const el = event.target;
+  return el instanceof HTMLInputElement || el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement || el.isContentEditable;
+}
+
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeMenus();
+    if (document.activeElement === textInput) textInput.blur();
+    return;
+  }
+  if (inField(event)) return;
+
   if (event.code === 'Space' && !event.repeat) {
     event.preventDefault();
     startRecording();
+  } else if (event.key === '/') {
+    // Jump to the text box, the way search works in most developer tools
+    event.preventDefault();
+    textInput.focus();
   }
 });
 window.addEventListener('keyup', (event) => {
-  if (event.code === 'Space') {
+  if (event.code === 'Space' && (isRecording || wantsToRecord)) {
     event.preventDefault();
     stopRecording();
   }
 });
 
+// Typing skips hearing entirely, so it costs no transcription at all
+composer.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = textInput.value.trim();
+  if (!text || isRecording || wantsToRecord) return;
+
+  wakeAudio();
+  closeMenus();
+  // Sending mid-reply interrupts it, the same as talking over it
+  cancelTurn(turn);
+  turn = null;
+  textInput.value = '';
+  runTurn({ typed: text });
+});
+
 hearingSelect.addEventListener('change', syncHandsFreeHearing);
 
 handsFreeToggle.addEventListener('change', () => {
+  wakeAudio();
   if (handsFreeToggle.checked) enableHandsFree();
   else disableHandsFree();
 });
@@ -1171,10 +1557,12 @@ async function restoreConversation() {
     const { turns } = await response.json();
     // Something may have been said while this was loading
     if (transcript.querySelector('.msg')) return;
-    for (const { role, text } of turns) addMessage(role, text);
+    for (const { role, text } of turns) addMessage(role, text, { time: null });
   } catch (err) {
     console.error(err);
   }
 }
 
 restoreConversation();
+refreshMemories();
+requestAnimationFrame(drawScope);

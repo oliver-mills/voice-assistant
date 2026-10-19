@@ -387,8 +387,20 @@ app.get('/api/history', (req, res) => {
   res.json({ turns });
 });
 
-// Starts a fresh conversation. Saved facts about the user are kept; ask the
-// assistant to forget them.
+// The memory panel: see what has been saved about you, and delete it directly
+// rather than having to ask
+app.get('/api/memories', (req, res) => {
+  res.json({ memories: localTools.listMemories() });
+});
+
+app.delete('/api/memories/:id', (req, res) => {
+  const removed = localTools.removeMemory(Number(req.params.id));
+  if (!removed) return res.status(404).json({ error: 'No saved fact with that id' });
+  res.json({ ok: true });
+});
+
+// Starts a fresh conversation. Saved facts about the user are kept; delete
+// them from the memory panel or ask the assistant to forget them.
 app.post('/api/reset', (req, res) => {
   conversationHistory = [];
   saveHistory();

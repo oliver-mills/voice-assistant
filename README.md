@@ -24,6 +24,17 @@ npm start
 Open <http://localhost:3000> in Chrome, Edge or Safari. Firefox works too, but
 has no speech recognition, so hearing always goes through ElevenLabs there.
 
+| Key | |
+| --- | --- |
+| hold <kbd>space</kbd> | Talk; talking over a reply interrupts it |
+| <kbd>/</kbd> | Jump to the text box. Typing costs no transcription at all |
+| <kbd>esc</kbd> | Close a menu, or leave the text box |
+
+The scope on the left shows the live signal: your mic while you talk, the
+reply's audio while it plays, and the room while hands-free is waiting. Under
+each reply are its timings, measured from when you stopped talking: how long
+hearing took, when the first word arrived, and when audio started.
+
 | Variable | |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | From console.anthropic.com |
