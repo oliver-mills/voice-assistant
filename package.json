@@ -1,11 +1,11 @@
 {
   "name": "voice-assistant",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "A browser voice assistant: Claude for the thinking, ElevenLabs or the browser for hearing and speaking",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
@@ -24,5 +24,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "multer": "^2.2.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
